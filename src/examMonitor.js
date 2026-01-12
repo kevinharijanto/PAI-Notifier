@@ -5,6 +5,7 @@ const { getDocument } = require('pdfjs-dist/legacy/build/pdf.mjs');
 const BASE_URL = 'https://www.aktuaris.or.id';
 const LOGIN_URL = `${BASE_URL}/page/login_validation`;
 const EXAM_URL = `${BASE_URL}/exam/index`;
+const REGISTRATION_URL = `${BASE_URL}/exam/registration`;
 
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
@@ -301,8 +302,76 @@ module.exports = {
     parseExamTable,
     fetchExamListForUser,
     fetchExamResultPdf,
+    checkRegistrationOpen,
     testExamFetch
 };
+
+/**
+ * Checks if exam registration is currently open
+ * @param {string} cookie - Session cookie
+ * @returns {Promise<{isOpen: boolean, periods: Array}>} Registration status and available periods
+ */
+async function checkRegistrationOpen(cookie) {
+    console.log(`[${new Date().toISOString()}] Checking registration page...`);
+
+    try {
+        const response = await axios.get(REGISTRATION_URL, {
+            headers: {
+                'User-Agent': USER_AGENT,
+                'Cookie': `ci_session=${cookie}`,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+            },
+            maxRedirects: 5
+        });
+
+        // Check if redirected to login
+        if (response.request.res.responseUrl &&
+            response.request.res.responseUrl.includes('/page/login')) {
+            console.log(`[${new Date().toISOString()}] Session expired`);
+            return { isOpen: false, periods: [], error: 'Session expired' };
+        }
+
+        const $ = cheerio.load(response.data);
+
+        // Find the Periode dropdown - look for select with name containing 'periode' 
+        // or the select element after a label containing 'Periode'
+        const periodeSelect = $('select[name*="periode"], select#periode').first();
+
+        if (periodeSelect.length === 0) {
+            // Try to find by looking at labels
+            const allSelects = $('select');
+            console.log(`[${new Date().toISOString()}] Found ${allSelects.length} select elements`);
+        }
+
+        const periods = [];
+
+        // Get all option elements that are not default/empty
+        periodeSelect.find('option').each((i, opt) => {
+            const value = $(opt).attr('value');
+            const text = $(opt).text().trim();
+
+            // Skip default "Pilih..." options or empty values
+            if (value && value !== '' && !text.toLowerCase().includes('pilih')) {
+                periods.push({
+                    value: value,
+                    text: text
+                });
+            }
+        });
+
+        const isOpen = periods.length > 0;
+        console.log(`[${new Date().toISOString()}] Registration open: ${isOpen}, periods: ${periods.length}`);
+
+        return {
+            isOpen,
+            periods
+        };
+
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] Error checking registration:`, error.message);
+        return { isOpen: false, periods: [], error: error.message };
+    }
+}
 
 /**
  * Fetches and parses exam result PDF

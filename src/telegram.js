@@ -1,6 +1,6 @@
 const TelegramBot = require('node-telegram-bot-api');
 const { scrapeArticles } = require('./scraper');
-const { fetchExamListForUser, fetchExamResultPdf, getSession } = require('./examMonitor');
+const { fetchExamListForUser, fetchExamResultPdf, getSession, checkRegistrationOpen } = require('./examMonitor');
 const {
     loadSeenArticles,
     getNewArticles,
@@ -107,6 +107,7 @@ Your Chat ID is: \`${chatId}\`
 /latest - Show the 5 latest articles
 /status - Bot status info
 /examstatus - Check PAI exam status
+/checkreg - Check if registration is open
 /setpai - Set PAI login credentials
 /help - Show this help message`;
 
@@ -487,6 +488,71 @@ The bot automatically checks for updates every ${process.env.CHECK_INTERVAL_MINU
             });
 
             bot.answerCallbackQuery(query.id);
+        }
+    });
+
+    // Handle /checkreg command - check if exam registration is open
+    bot.onText(/\/checkreg/, async (msg) => {
+        const chatId = msg.chat.id;
+        const userId = msg.from.id;
+
+        if (!canUseBot(userId)) {
+            bot.sendMessage(chatId, '🔒 Access denied. Send /start to request access.');
+            return;
+        }
+
+        const email = getUserPreference(userId, 'paiEmail', null);
+        const password = getUserPreference(userId, 'paiPassword', null);
+
+        if (!email || !password) {
+            bot.sendMessage(chatId, '❌ PAI credentials not set.\n\nSend /setpai to set your credentials first.', { parse_mode: 'Markdown' });
+            return;
+        }
+
+        try {
+            const statusMsg = await bot.sendMessage(chatId, '🔍 Checking registration status...');
+
+            const cookie = await getSession(userId, email, password);
+            if (!cookie) {
+                bot.editMessageText('❌ Failed to login. Check your credentials.', {
+                    chat_id: chatId,
+                    message_id: statusMsg.message_id
+                });
+                return;
+            }
+
+            const result = await checkRegistrationOpen(cookie);
+
+            if (result.error) {
+                bot.editMessageText(`❌ Error: ${result.error}`, {
+                    chat_id: chatId,
+                    message_id: statusMsg.message_id
+                });
+                return;
+            }
+
+            let message;
+            if (result.isOpen) {
+                message = `🟢 *Registration is OPEN!*\n\n`;
+                message += `*Available Periods:*\n`;
+                result.periods.forEach((p, i) => {
+                    message += `${i + 1}. ${escapeMarkdown(p.text)}\n`;
+                });
+                message += `\n👉 [Register Now](https://www.aktuaris.or.id/exam/registration)`;
+            } else {
+                message = `🔴 *Registration is CLOSED*\n\nNo registration periods available at this time.`;
+            }
+
+            bot.editMessageText(message, {
+                chat_id: chatId,
+                message_id: statusMsg.message_id,
+                parse_mode: 'Markdown',
+                disable_web_page_preview: true
+            });
+
+        } catch (error) {
+            console.error('Error checking registration:', error);
+            bot.sendMessage(chatId, `❌ Error: ${error.message}`);
         }
     });
 
