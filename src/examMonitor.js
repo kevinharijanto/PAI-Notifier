@@ -1,6 +1,6 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
-const pdf = require('pdf-parse');
+const pdfParse = require('pdf-parse/lib/pdf-parse');
 
 const BASE_URL = 'https://www.aktuaris.or.id';
 const LOGIN_URL = `${BASE_URL}/page/login_validation`;
@@ -327,7 +327,7 @@ async function fetchExamResultPdf(pdfUrl, cookie) {
         });
 
         const dataBuffer = Buffer.from(response.data);
-        const pdfData = await pdf(dataBuffer);
+        const pdfData = await pdfParse(dataBuffer);
         const text = pdfData.text;
 
         // Parse the PDF text to extract exam result
