@@ -1,5 +1,6 @@
 const TelegramBot = require('node-telegram-bot-api');
 const { scrapeArticles } = require('./scraper');
+const { fetchExamListForUser } = require('./examMonitor');
 const {
     loadSeenArticles,
     getNewArticles,
@@ -220,6 +221,151 @@ The bot automatically checks for updates every ${process.env.CHECK_INTERVAL_MINU
         }
 
         bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+    });
+
+    // ==================== EXAM COMMANDS ====================
+
+    // Handle /setpai command - start PAI credentials setup flow
+    bot.onText(/\/setpai(?:\s+(.+))?/, async (msg, match) => {
+        const chatId = msg.chat.id;
+        const userId = msg.from.id;
+        const args = match[1] ? match[1].trim() : null;
+
+        if (!canUseBot(userId)) {
+            bot.sendMessage(chatId, '\ud83d\udd12 Access denied. Send /start to request access.');
+            return;
+        }
+
+        // Handle clear command
+        if (args && args.toLowerCase() === 'clear') {
+            setUserPreference(userId, 'paiEmail', null);
+            setUserPreference(userId, 'paiPassword', null);
+            setUserPreference(userId, 'paiLoginStep', null);
+            bot.sendMessage(chatId, '\ud83d\uddd1 PAI credentials removed.');
+            return;
+        }
+
+        // Check current credentials status
+        const currentEmail = getUserPreference(userId, 'paiEmail', null);
+
+        if (currentEmail && !args) {
+            // Already has credentials, show options
+            bot.sendMessage(chatId,
+                `\u2705 *PAI Credentials*\n\nEmail: \`${currentEmail}\`\n\n` +
+                `\u2022 Send /setpai again to update\n` +
+                `\u2022 Send \`/setpai clear\` to remove`,
+                { parse_mode: 'Markdown' }
+            );
+            return;
+        }
+
+        // Start the login flow - ask for email
+        setUserPreference(userId, 'paiLoginStep', 'email');
+        bot.sendMessage(chatId, '\ud83d\udce7 *PAI Login Setup*\n\nPlease enter your *email*:', { parse_mode: 'Markdown' });
+    });
+
+    // Handle text messages for PAI login flow
+    bot.on('message', async (msg) => {
+        // Skip commands and non-text messages
+        if (!msg.text || msg.text.startsWith('/')) return;
+
+        const chatId = msg.chat.id;
+        const userId = msg.from.id;
+        const text = msg.text.trim();
+
+        const loginStep = getUserPreference(userId, 'paiLoginStep', null);
+
+        if (!loginStep) return; // Not in login flow
+
+        if (loginStep === 'email') {
+            // User sent email
+            setUserPreference(userId, 'paiTempEmail', text);
+            setUserPreference(userId, 'paiLoginStep', 'password');
+            bot.sendMessage(chatId, `\ud83d\udd10 Email: \`${text}\`\n\nNow enter your *password*:\n\n_\u26a0\ufe0f Your message will be deleted for security_`, { parse_mode: 'Markdown' });
+
+        } else if (loginStep === 'password') {
+            // User sent password - delete message immediately
+            try {
+                await bot.deleteMessage(chatId, msg.message_id);
+            } catch (e) {
+                // May fail if bot doesn't have delete permission
+            }
+
+            const email = getUserPreference(userId, 'paiTempEmail', null);
+
+            if (!email) {
+                setUserPreference(userId, 'paiLoginStep', null);
+                bot.sendMessage(chatId, '\u274c Something went wrong. Please start again with /setpai');
+                return;
+            }
+
+            // Save credentials
+            setUserPreference(userId, 'paiEmail', email);
+            setUserPreference(userId, 'paiPassword', text);
+            setUserPreference(userId, 'paiTempEmail', null);
+            setUserPreference(userId, 'paiLoginStep', null);
+
+            bot.sendMessage(chatId,
+                `\u2705 *PAI Credentials Saved*\n\n` +
+                `Email: \`${email}\`\n\n` +
+                `Use /examstatus to check your exams.`,
+                { parse_mode: 'Markdown' }
+            );
+        }
+    });
+
+    // Handle /examstatus command - fetch and display exam status
+    bot.onText(/\/examstatus/, async (msg) => {
+        const chatId = msg.chat.id;
+        const userId = msg.from.id;
+
+        if (!canUseBot(userId)) {
+            bot.sendMessage(chatId, '🔒 Access denied. Send /start to request access.');
+            return;
+        }
+
+        const email = getUserPreference(userId, 'paiEmail', null);
+        const password = getUserPreference(userId, 'paiPassword', null);
+
+        if (!email || !password) {
+            bot.sendMessage(chatId, '❌ PAI credentials not set.\n\nUse `/setpai email password` to set your credentials first.', { parse_mode: 'Markdown' });
+            return;
+        }
+
+        try {
+            bot.sendMessage(chatId, '📝 Logging in and fetching exam status...');
+
+            const exams = await fetchExamListForUser(userId, email, password);
+
+            if (!exams) {
+                bot.sendMessage(chatId, '❌ Failed to fetch exams. Check your credentials with /setpai or try again later.');
+                return;
+            }
+
+            if (exams.length === 0) {
+                bot.sendMessage(chatId, '📭 No exams found.');
+                return;
+            }
+
+            let message = `*📋 Exam Status (${exams.length}):*\n\n`;
+
+            exams.forEach((exam, index) => {
+                message += `*${index + 1}. ${escapeMarkdown(exam.kode)}*\n`;
+                message += `📅 ${escapeMarkdown(exam.periode)}\n`;
+                message += `📍 ${escapeMarkdown(exam.kota)}\n`;
+                message += `✅ ${escapeMarkdown(exam.status)}\n`;
+                if (exam.actions.length > 0) {
+                    message += `🔗 ${exam.actions.map(a => escapeMarkdown(a.text)).join(', ')}\n`;
+                }
+                message += `\n`;
+            });
+
+            bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+
+        } catch (error) {
+            console.error('Error fetching exam status:', error);
+            bot.sendMessage(chatId, `❌ Error: ${error.message}`);
+        }
     });
 
     // ==================== ADMIN COMMANDS ====================
