@@ -1,6 +1,6 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
-const pdfParse = require('pdf-parse/lib/pdf-parse');
+const pdfParse = require('pdf-parse');
 
 const BASE_URL = 'https://www.aktuaris.or.id';
 const LOGIN_URL = `${BASE_URL}/page/login_validation`;
