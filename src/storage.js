@@ -6,6 +6,7 @@ const SEEN_ARTICLES_FILE = path.join(DATA_DIR, 'seen_articles.json');
 const ALLOWED_USERS_FILE = path.join(DATA_DIR, 'allowed_users.json');
 const ACCESS_REQUESTS_FILE = path.join(DATA_DIR, 'access_requests.json');
 const USER_PREFS_FILE = path.join(DATA_DIR, 'user_preferences.json');
+const EXAM_RESULTS_FILE = path.join(DATA_DIR, 'exam_results.json');
 
 /**
  * Ensures the data directory exists
@@ -321,6 +322,66 @@ function getAllUsersWithReminders() {
     return users;
 }
 
+// ==================== EXAM RESULTS ====================
+
+/**
+ * Loads cached exam results from storage
+ * @returns {Object} Object mapping examId to result data
+ */
+function loadExamResults() {
+    ensureDataDir();
+
+    if (!fs.existsSync(EXAM_RESULTS_FILE)) {
+        return {};
+    }
+
+    try {
+        const data = fs.readFileSync(EXAM_RESULTS_FILE, 'utf8');
+        return JSON.parse(data) || {};
+    } catch (error) {
+        console.error('Error loading exam results:', error.message);
+        return {};
+    }
+}
+
+/**
+ * Saves exam results to storage
+ * @param {Object} results - Object mapping examId to result data
+ */
+function saveExamResults(results) {
+    ensureDataDir();
+
+    try {
+        fs.writeFileSync(EXAM_RESULTS_FILE, JSON.stringify(results, null, 2));
+    } catch (error) {
+        console.error('Error saving exam results:', error.message);
+    }
+}
+
+/**
+ * Gets cached exam result for a specific exam
+ * @param {string} examId - The exam code/ID
+ * @returns {Object|null} Cached result or null if not cached
+ */
+function getCachedExamResult(examId) {
+    const results = loadExamResults();
+    return results[examId] || null;
+}
+
+/**
+ * Saves an exam result to cache
+ * @param {string} examId - The exam code/ID
+ * @param {Object} result - The parsed exam result
+ */
+function cacheExamResult(examId, result) {
+    const results = loadExamResults();
+    results[examId] = {
+        ...result,
+        cachedAt: new Date().toISOString()
+    };
+    saveExamResults(results);
+}
+
 module.exports = {
     loadSeenArticles,
     saveSeenArticles,
@@ -343,5 +404,10 @@ module.exports = {
     saveUserPreferences,
     getUserPreference,
     setUserPreference,
-    getAllUsersWithReminders
+    getAllUsersWithReminders,
+    // Exam results
+    loadExamResults,
+    saveExamResults,
+    getCachedExamResult,
+    cacheExamResult
 };

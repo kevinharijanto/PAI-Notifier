@@ -14,7 +14,9 @@ const {
     loadAllowedUsers,
     getUserPreference,
     setUserPreference,
-    getAllUsersWithReminders
+    getAllUsersWithReminders,
+    getCachedExamResult,
+    cacheExamResult
 } = require('./storage');
 
 let bot = null;
@@ -358,10 +360,22 @@ The bot automatically checks for updates every ${process.env.CHECK_INTERVAL_MINU
 
             // Fetch PDF results for exams that have result links
             for (const exam of exams) {
-                // The print_exam_result link is in the "Hasil Ujian" column, not actions
+                // Check cache first using exam code as ID
+                const cached = getCachedExamResult(exam.kode);
+                if (cached) {
+                    exam.result = cached;
+                    continue;
+                }
+
+                // Not cached - fetch from PDF if link available
                 if (exam.hasilUjian && exam.hasilUjian.link && cookie) {
                     try {
-                        exam.result = await fetchExamResultPdf(exam.hasilUjian.link, cookie);
+                        const result = await fetchExamResultPdf(exam.hasilUjian.link, cookie);
+                        if (result) {
+                            exam.result = result;
+                            // Cache the result
+                            cacheExamResult(exam.kode, result);
+                        }
                     } catch (e) {
                         console.error('Error fetching PDF result:', e.message);
                     }
