@@ -49,6 +49,34 @@ function canUseBot(userId) {
 }
 
 /**
+ * Formats a page of exam results for display
+ * @param {Array} exams - All exam data
+ * @param {number} page - Current page (0-indexed)
+ * @param {number} perPage - Items per page
+ * @returns {string} Formatted message
+ */
+function formatExamPage(exams, page, perPage) {
+    const start = page * perPage;
+    const end = Math.min(start + perPage, exams.length);
+    const pageExams = exams.slice(start, end);
+
+    let message = `*📋 Exam Status (${exams.length} total):*\n\n`;
+
+    pageExams.forEach((exam, index) => {
+        const num = start + index + 1;
+        const scoreStr = exam.result && exam.result.score !== null
+            ? ` • *${exam.result.score}* ${exam.result.passed ? '✅' : '❌'}`
+            : '';
+
+        message += `*${num}. ${escapeMarkdown(exam.kode)}*${scoreStr}\n`;
+        message += `   ${escapeMarkdown(exam.periode)} • ${escapeMarkdown(exam.kota)}\n`;
+    });
+
+    return message;
+}
+
+
+/**
  * Initializes the Telegram bot
  * @returns {TelegramBot} The bot instance
  */
@@ -78,6 +106,8 @@ Your Chat ID is: \`${chatId}\`
 /check - Check for new articles now
 /latest - Show the 5 latest articles
 /status - Bot status info
+/examstatus - Check PAI exam status
+/setpai - Set PAI login credentials
 /help - Show this help message`;
 
             if (isAdmin(userId)) {
@@ -382,38 +412,81 @@ The bot automatically checks for updates every ${process.env.CHECK_INTERVAL_MINU
                 }
             }
 
-            let message = `*📋 Exam Status (${exams.length}):*\n\n`;
+            // Build compact display with pagination
+            const ITEMS_PER_PAGE = 3;
+            const totalPages = Math.ceil(exams.length / ITEMS_PER_PAGE);
 
-            exams.forEach((exam, index) => {
-                message += `*${index + 1}. ${escapeMarkdown(exam.kode)}*\n`;
-                message += `📅 ${escapeMarkdown(exam.periode)}\n`;
-                message += `📍 ${escapeMarkdown(exam.kota)}\n`;
-                message += `✅ ${escapeMarkdown(exam.status)}\n`;
+            // Store exams in user preference for pagination
+            setUserPreference(userId, 'examData', JSON.stringify(exams));
 
-                // Show score if available from PDF
-                if (exam.result && exam.result.score !== null) {
-                    const passIcon = exam.result.passed ? '✅' : '❌';
-                    message += `📊 *Score: ${exam.result.score}* ${passIcon}\n`;
-                    if (exam.result.subject) {
-                        message += `📖 ${escapeMarkdown(exam.result.subject)}\n`;
-                    }
+            const message = formatExamPage(exams, 0, ITEMS_PER_PAGE);
+            const keyboard = exams.length > ITEMS_PER_PAGE ? {
+                reply_markup: {
+                    inline_keyboard: [[
+                        { text: `1/${totalPages}`, callback_data: 'exam_page_info' },
+                        { text: 'Next ▶', callback_data: 'exam_page_1' }
+                    ]]
                 }
-
-                if (exam.actions.length > 0) {
-                    message += `🔗 ${exam.actions.map(a => escapeMarkdown(a.text)).join(', ')}\n`;
-                }
-                message += `\n`;
-            });
+            } : {};
 
             bot.editMessageText(message, {
                 chat_id: chatId,
                 message_id: statusMsg.message_id,
-                parse_mode: 'Markdown'
+                parse_mode: 'Markdown',
+                ...keyboard
             });
 
         } catch (error) {
             console.error('Error fetching exam status:', error);
             bot.sendMessage(chatId, `❌ Error: ${error.message}`);
+        }
+    });
+
+    // Handle exam pagination
+    bot.on('callback_query', async (query) => {
+        const data = query.data;
+        const chatId = query.message.chat.id;
+        const userId = query.from.id;
+        const messageId = query.message.message_id;
+
+        if (data.startsWith('exam_page_')) {
+            if (data === 'exam_page_info') {
+                bot.answerCallbackQuery(query.id);
+                return;
+            }
+
+            const page = parseInt(data.split('_')[2]);
+            const examDataStr = getUserPreference(userId, 'examData', null);
+
+            if (!examDataStr) {
+                bot.answerCallbackQuery(query.id, { text: 'Data expired. Run /examstatus again.' });
+                return;
+            }
+
+            const exams = JSON.parse(examDataStr);
+            const ITEMS_PER_PAGE = 3;
+            const totalPages = Math.ceil(exams.length / ITEMS_PER_PAGE);
+
+            const message = formatExamPage(exams, page, ITEMS_PER_PAGE);
+
+            // Build pagination buttons
+            const buttons = [];
+            if (page > 0) {
+                buttons.push({ text: '◀ Prev', callback_data: `exam_page_${page - 1}` });
+            }
+            buttons.push({ text: `${page + 1}/${totalPages}`, callback_data: 'exam_page_info' });
+            if (page < totalPages - 1) {
+                buttons.push({ text: 'Next ▶', callback_data: `exam_page_${page + 1}` });
+            }
+
+            bot.editMessageText(message, {
+                chat_id: chatId,
+                message_id: messageId,
+                parse_mode: 'Markdown',
+                reply_markup: { inline_keyboard: [buttons] }
+            });
+
+            bot.answerCallbackQuery(query.id);
         }
     });
 
