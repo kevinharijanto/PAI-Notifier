@@ -356,12 +356,12 @@ The bot automatically checks for updates every ${process.env.CHECK_INTERVAL_MINU
             // Get session cookie for PDF fetching
             const cookie = await getSession(userId, email, password);
 
-            // Fetch PDF results for exams that have print links
+            // Fetch PDF results for exams that have result links
             for (const exam of exams) {
-                const printAction = exam.actions.find(a => a.link && a.link.includes('print_exam_result'));
-                if (printAction && cookie) {
+                // The print_exam_result link is in the "Hasil Ujian" column, not actions
+                if (exam.hasilUjian && exam.hasilUjian.link && cookie) {
                     try {
-                        exam.result = await fetchExamResultPdf(printAction.link, cookie);
+                        exam.result = await fetchExamResultPdf(exam.hasilUjian.link, cookie);
                     } catch (e) {
                         console.error('Error fetching PDF result:', e.message);
                     }
