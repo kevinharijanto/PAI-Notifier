@@ -916,6 +916,9 @@ What would you like to do?`;
         { command: 'start', description: 'Start the bot / Request access' },
         { command: 'check', description: 'Check for new articles now' },
         { command: 'latest', description: 'Show the 5 latest articles' },
+        { command: 'examstatus', description: 'Check PAI exam status' },
+        { command: 'checkreg', description: 'Check if registration is open' },
+        { command: 'setpai', description: 'Set PAI login credentials' },
         { command: 'reminder', description: 'Set your notification interval' },
         { command: 'status', description: 'Bot status info' },
         { command: 'help', description: 'Show help message' }

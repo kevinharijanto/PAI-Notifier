@@ -1,8 +1,9 @@
 require('dotenv').config();
 
 const cron = require('node-cron');
-const { initBot, sendNewArticlesNotification } = require('./telegram');
+const { initBot, sendNewArticlesNotification, getBot } = require('./telegram');
 const { scrapeArticles } = require('./scraper');
+const { checkRegistrationOpen, getSession } = require('./examMonitor');
 const {
     loadSeenArticles,
     getNewArticles,
@@ -15,6 +16,8 @@ const {
 
 // Track last check time per user for interval-based scheduling
 const userLastCheck = new Map();
+// Track last known registration status to detect changes
+let lastRegistrationOpen = false;
 
 /**
  * Main check function - scrapes website and notifies if new articles found
@@ -75,6 +78,53 @@ async function checkForUpdates(isFirstRun = false, userId = null) {
 }
 
 /**
+ * Checks registration status for all users with PAI credentials
+ * Notifies if registration becomes available
+ */
+async function checkRegistrationForUsers() {
+    const usersWithReminders = getAllUsersWithReminders();
+
+    for (const user of usersWithReminders) {
+        const email = getUserPreference(user.userId, 'paiEmail', null);
+        const password = getUserPreference(user.userId, 'paiPassword', null);
+
+        if (!email || !password) continue; // Skip users without PAI credentials
+
+        try {
+            const cookie = await getSession(user.userId, email, password);
+            if (!cookie) continue;
+
+            const result = await checkRegistrationOpen(cookie);
+
+            // Notify user if registration just opened
+            if (result.isOpen && !lastRegistrationOpen) {
+                const bot = getBot();
+                if (bot) {
+                    let message = `🟢 *PAI Exam Registration is NOW OPEN!*\n\n`;
+                    message += `*Available Periods:*\n`;
+                    result.periods.forEach((p, i) => {
+                        message += `${i + 1}. ${p.text}\n`;
+                    });
+                    message += `\n👉 [Register Now](https://www.aktuaris.or.id/exam/registration)`;
+
+                    await bot.sendMessage(user.userId, message, {
+                        parse_mode: 'Markdown',
+                        disable_web_page_preview: true
+                    });
+                    console.log(`[${new Date().toISOString()}] Notified user ${user.userId} about registration opening`);
+                }
+            }
+
+            lastRegistrationOpen = result.isOpen;
+            break; // Only need to check once per cycle
+
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] Error checking registration:`, error.message);
+        }
+    }
+}
+
+/**
  * Checks if it's time to run a check based on per-user intervals
  */
 async function runPerUserChecks() {
@@ -96,6 +146,8 @@ async function runPerUserChecks() {
 
     if (needsCheck) {
         await checkForUpdates(false);
+        // Also check registration on the same schedule
+        await checkRegistrationForUsers();
     }
 }
 
