@@ -164,7 +164,7 @@ The bot automatically checks for updates every ${process.env.CHECK_INTERVAL_MINU
     });
 
     // Handle /check command - manual check for updates (authorized users only)
-    bot.onText(/\/check/, async (msg) => {
+    bot.onText(/\/check$/, async (msg) => {
         const chatId = msg.chat.id;
         const userId = msg.from.id;
 
