@@ -7,7 +7,13 @@
     "start": "node src/index.js",
     "test": "node src/index.js --test"
   },
-  "keywords": ["telegram", "bot", "scraper", "aktuaris", "pai"],
+  "keywords": [
+    "telegram",
+    "bot",
+    "scraper",
+    "aktuaris",
+    "pai"
+  ],
   "author": "",
   "license": "MIT",
   "dependencies": {
@@ -15,6 +21,7 @@
     "cheerio": "^1.0.0-rc.12",
     "dotenv": "^16.3.1",
     "node-cron": "^3.0.3",
-    "node-telegram-bot-api": "^0.64.0"
+    "node-telegram-bot-api": "^0.64.0",
+    "pdf-parse": "^2.4.5"
   }
 }

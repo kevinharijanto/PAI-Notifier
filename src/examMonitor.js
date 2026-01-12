@@ -1,5 +1,6 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
+const pdf = require('pdf-parse');
 
 const BASE_URL = 'https://www.aktuaris.or.id';
 const LOGIN_URL = `${BASE_URL}/page/login_validation`;
@@ -182,14 +183,21 @@ function parseExamTable(html) {
                     link: $(cells[3]).find('a').attr('href') || null
                 },
                 status: $(cells[4]).text().trim(),
-                actions: []
+                actions: [],
+                result: null // Will be populated from PDF
             };
 
+            // Filter actions - only keep relevant ones
+            const excludeActions = ['detail', 'cetak undangan', 'cetak kartu ujian'];
             $(cells[5]).find('a').each((i, link) => {
-                exam.actions.push({
-                    text: $(link).text().trim(),
-                    link: $(link).attr('href')
-                });
+                const text = $(link).text().trim();
+                const lowerText = text.toLowerCase();
+                if (!excludeActions.some(ex => lowerText.includes(ex))) {
+                    exam.actions.push({
+                        text: text,
+                        link: $(link).attr('href')
+                    });
+                }
             });
 
             if (exam.kode && exam.kode !== 'KODE') {
@@ -292,6 +300,67 @@ module.exports = {
     fetchExamPage,
     parseExamTable,
     fetchExamListForUser,
+    fetchExamResultPdf,
     testExamFetch
 };
 
+/**
+ * Fetches and parses exam result PDF
+ * @param {string} pdfUrl - Full URL or relative path to the PDF
+ * @param {string} cookie - Session cookie
+ * @returns {Promise<Object|null>} Parsed result or null
+ */
+async function fetchExamResultPdf(pdfUrl, cookie) {
+    // Ensure absolute URL
+    const fullUrl = pdfUrl.startsWith('http') ? pdfUrl : `${BASE_URL}${pdfUrl}`;
+    console.log(`[${new Date().toISOString()}] Fetching PDF result from ${fullUrl}`);
+
+    try {
+        const response = await axios.get(fullUrl, {
+            headers: {
+                'User-Agent': USER_AGENT,
+                'Cookie': `ci_session=${cookie}`,
+                'Accept': 'application/pdf',
+            },
+            responseType: 'arraybuffer',
+            maxRedirects: 5,
+        });
+
+        const dataBuffer = Buffer.from(response.data);
+        const pdfData = await pdf(dataBuffer);
+        const text = pdfData.text;
+
+        // Parse the PDF text to extract exam result
+        // Format: "CF2-Probabilitas dan Statistika (CF2) = 70.00"
+        const result = {
+            rawText: text,
+            subject: null,
+            subjectCode: null,
+            score: null,
+            passed: null,
+            periode: null
+        };
+
+        // Extract subject and score: "SubjectName (CODE) = XX.XX"
+        const scoreMatch = text.match(/([\w\-]+[\w\s\-]+)\s*\(([A-Z0-9]+)\)\s*=\s*([\d.]+)/i);
+        if (scoreMatch) {
+            result.subject = scoreMatch[1].trim();
+            result.subjectCode = scoreMatch[2].trim();
+            result.score = parseFloat(scoreMatch[3]);
+            result.passed = result.score >= 70; // Passing grade is 70
+        }
+
+        // Extract periode: "Periode III Tahun 2025" or similar
+        const periodeMatch = text.match(/Periode\s+([IVX]+)\s+Tahun\s+(\d{4})/i);
+        if (periodeMatch) {
+            result.periode = `Periode ${periodeMatch[1]} ${periodeMatch[2]}`;
+        }
+
+        console.log(`[${new Date().toISOString()}] PDF parsed: ${result.subjectCode} = ${result.score}`);
+        return result;
+
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] Error fetching/parsing PDF:`, error.message);
+        return null;
+    }
+}

@@ -1,6 +1,6 @@
 const TelegramBot = require('node-telegram-bot-api');
 const { scrapeArticles } = require('./scraper');
-const { fetchExamListForUser } = require('./examMonitor');
+const { fetchExamListForUser, fetchExamResultPdf, getSession } = require('./examMonitor');
 const {
     loadSeenArticles,
     getNewArticles,
@@ -328,23 +328,44 @@ The bot automatically checks for updates every ${process.env.CHECK_INTERVAL_MINU
         const password = getUserPreference(userId, 'paiPassword', null);
 
         if (!email || !password) {
-            bot.sendMessage(chatId, '❌ PAI credentials not set.\n\nUse `/setpai email password` to set your credentials first.', { parse_mode: 'Markdown' });
+            bot.sendMessage(chatId, '❌ PAI credentials not set.\n\nSend /setpai to set your credentials first.', { parse_mode: 'Markdown' });
             return;
         }
 
         try {
-            bot.sendMessage(chatId, '📝 Logging in and fetching exam status...');
+            const statusMsg = await bot.sendMessage(chatId, '📝 Logging in and fetching exam status...');
 
             const exams = await fetchExamListForUser(userId, email, password);
 
             if (!exams) {
-                bot.sendMessage(chatId, '❌ Failed to fetch exams. Check your credentials with /setpai or try again later.');
+                bot.editMessageText('❌ Failed to fetch exams. Check your credentials with /setpai or try again later.', {
+                    chat_id: chatId,
+                    message_id: statusMsg.message_id
+                });
                 return;
             }
 
             if (exams.length === 0) {
-                bot.sendMessage(chatId, '📭 No exams found.');
+                bot.editMessageText('📭 No exams found.', {
+                    chat_id: chatId,
+                    message_id: statusMsg.message_id
+                });
                 return;
+            }
+
+            // Get session cookie for PDF fetching
+            const cookie = await getSession(userId, email, password);
+
+            // Fetch PDF results for exams that have print links
+            for (const exam of exams) {
+                const printAction = exam.actions.find(a => a.link && a.link.includes('print_exam_result'));
+                if (printAction && cookie) {
+                    try {
+                        exam.result = await fetchExamResultPdf(printAction.link, cookie);
+                    } catch (e) {
+                        console.error('Error fetching PDF result:', e.message);
+                    }
+                }
             }
 
             let message = `*📋 Exam Status (${exams.length}):*\n\n`;
@@ -354,13 +375,27 @@ The bot automatically checks for updates every ${process.env.CHECK_INTERVAL_MINU
                 message += `📅 ${escapeMarkdown(exam.periode)}\n`;
                 message += `📍 ${escapeMarkdown(exam.kota)}\n`;
                 message += `✅ ${escapeMarkdown(exam.status)}\n`;
+
+                // Show score if available from PDF
+                if (exam.result && exam.result.score !== null) {
+                    const passIcon = exam.result.passed ? '✅' : '❌';
+                    message += `📊 *Score: ${exam.result.score}* ${passIcon}\n`;
+                    if (exam.result.subject) {
+                        message += `📖 ${escapeMarkdown(exam.result.subject)}\n`;
+                    }
+                }
+
                 if (exam.actions.length > 0) {
                     message += `🔗 ${exam.actions.map(a => escapeMarkdown(a.text)).join(', ')}\n`;
                 }
                 message += `\n`;
             });
 
-            bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+            bot.editMessageText(message, {
+                chat_id: chatId,
+                message_id: statusMsg.message_id,
+                parse_mode: 'Markdown'
+            });
 
         } catch (error) {
             console.error('Error fetching exam status:', error);
