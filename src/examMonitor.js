@@ -1,7 +1,6 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
-const pdfParseModule = require('pdf-parse');
-const pdfParse = pdfParseModule.default || pdfParseModule;
+const { getDocument } = require('pdfjs-dist/legacy/build/pdf.mjs');
 
 const BASE_URL = 'https://www.aktuaris.or.id';
 const LOGIN_URL = `${BASE_URL}/page/login_validation`;
@@ -327,9 +326,17 @@ async function fetchExamResultPdf(pdfUrl, cookie) {
             maxRedirects: 5,
         });
 
-        const dataBuffer = Buffer.from(response.data);
-        const pdfData = await pdfParse(dataBuffer);
-        const text = pdfData.text;
+        // Use pdfjs-dist to parse the PDF
+        const data = new Uint8Array(response.data);
+        const pdfDoc = await getDocument({ data }).promise;
+
+        // Extract text from all pages
+        let text = '';
+        for (let i = 1; i <= pdfDoc.numPages; i++) {
+            const page = await pdfDoc.getPage(i);
+            const textContent = await page.getTextContent();
+            text += textContent.items.map(item => item.str).join(' ') + '\n';
+        }
 
         // Parse the PDF text to extract exam result
         // Format: "CF2-Probabilitas dan Statistika (CF2) = 70.00"

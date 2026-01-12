@@ -22,6 +22,6 @@
     "dotenv": "^16.3.1",
     "node-cron": "^3.0.3",
     "node-telegram-bot-api": "^0.64.0",
-    "pdf-parse": "^2.4.5"
+    "pdfjs-dist": "^5.4.530"
   }
 }
