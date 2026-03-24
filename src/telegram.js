@@ -1,6 +1,7 @@
 const TelegramBot = require('node-telegram-bot-api');
 const { scrapeArticles } = require('./scraper');
 const { fetchExamListForUser, fetchExamResultPdf, getSession, checkRegistrationOpen } = require('./examMonitor');
+const { fetchShortcodes, downloadPost, cleanupTmpDir } = require('./instagramMonitor');
 const {
     loadSeenArticles,
     getNewArticles,
@@ -16,7 +17,10 @@ const {
     setUserPreference,
     getAllUsersWithReminders,
     getCachedExamResult,
-    cacheExamResult
+    cacheExamResult,
+    getWatchedAccounts,
+    addWatchedAccount,
+    removeWatchedAccount,
 } = require('./storage');
 
 let bot = null;
@@ -109,6 +113,9 @@ Your Chat ID is: \`${chatId}\`
 /examstatus - Check PAI exam status
 /checkreg - Check if registration is open
 /setpai - Set PAI login credentials
+/instawatch - Watch an Instagram account
+/instalist - List watched IG accounts
+/instaremove - Stop watching an IG account
 /help - Show this help message`;
 
             if (isAdmin(userId)) {
@@ -149,9 +156,16 @@ Your User ID: \`${userId}\``;
 /check - Manually check for new articles
 /latest - Show the 5 latest articles on the website
 /status - Show bot status and last check time
+
+*Instagram:*
+/instawatch \<username\> - Watch an IG account
+/instalist - List watched accounts
+/instaremove \<username\> - Stop watching
+
 /help - Show this help message
 
-The bot automatically checks for updates every ${process.env.CHECK_INTERVAL_MINUTES || 30} minutes.`;
+The bot automatically checks for updates every ${process.env.CHECK_INTERVAL_MINUTES || 30} minutes.
+Instagram is checked daily at 8 AM.`;
 
         if (isAdmin(userId)) {
             message += `
@@ -556,6 +570,123 @@ The bot automatically checks for updates every ${process.env.CHECK_INTERVAL_MINU
         }
     });
 
+    // ==================== INSTAGRAM COMMANDS ====================
+
+    // Handle /instawatch command - add an Instagram account to watchlist
+    bot.onText(/\/instawatch(?:\s+(.+))?/, async (msg, match) => {
+        const chatId = msg.chat.id;
+        const userId = msg.from.id;
+        const username = match[1] ? match[1].trim().toLowerCase().replace(/^@/, '') : null;
+
+        if (!canUseBot(userId)) {
+            bot.sendMessage(chatId, '🔒 Access denied. Send /start to request access.');
+            return;
+        }
+
+        if (!username) {
+            bot.sendMessage(chatId, '❌ Please provide a username.\n\nExample: `/instawatch natgeo`', { parse_mode: 'Markdown' });
+            return;
+        }
+
+        // Validate the username by trying to fetch shortcodes
+        const statusMsg = await bot.sendMessage(chatId, `🔍 Verifying @${username}...`);
+
+        try {
+            const posts = await fetchShortcodes(username);
+
+            if (posts.length === 0) {
+                bot.editMessageText(`❌ No posts found for @${username}. Make sure the profile is public.`, {
+                    chat_id: chatId,
+                    message_id: statusMsg.message_id
+                });
+                return;
+            }
+
+            const added = addWatchedAccount(userId, username);
+
+            if (!added) {
+                bot.editMessageText(`ℹ️ You're already watching @${username}.`, {
+                    chat_id: chatId,
+                    message_id: statusMsg.message_id
+                });
+                return;
+            }
+
+            bot.editMessageText(`✅ Now watching *@${username}*!\n\n📸 Fetching latest post...`, {
+                chat_id: chatId,
+                message_id: statusMsg.message_id,
+                parse_mode: 'Markdown'
+            });
+
+            // Send the latest post immediately
+            try {
+                const latestPost = posts[0];
+                await sendInstagramPost(chatId, username, latestPost.shortcode);
+            } catch (postError) {
+                console.error('[Instagram] Error sending first post:', postError.message);
+                bot.sendMessage(chatId, '⚠️ Watchlist added but could not fetch the latest post. Will try again on next daily check.');
+            }
+
+        } catch (error) {
+            console.error('[Instagram] Error in /instawatch:', error.message);
+            bot.editMessageText(`❌ Could not find @${username}. Make sure the username is correct and the profile is public.`, {
+                chat_id: chatId,
+                message_id: statusMsg.message_id
+            });
+        }
+    });
+
+    // Handle /instalist command - show watched Instagram accounts
+    bot.onText(/\/instalist/, (msg) => {
+        const chatId = msg.chat.id;
+        const userId = msg.from.id;
+
+        if (!canUseBot(userId)) {
+            bot.sendMessage(chatId, '🔒 Access denied. Send /start to request access.');
+            return;
+        }
+
+        const watchList = getWatchedAccounts(userId);
+
+        if (watchList.length === 0) {
+            bot.sendMessage(chatId, '📭 You\'re not watching any Instagram accounts.\n\nUse `/instawatch <username>` to start watching.', { parse_mode: 'Markdown' });
+            return;
+        }
+
+        let message = `📸 *Your Instagram Watchlist (${watchList.length}):*\n\n`;
+        watchList.forEach((username, index) => {
+            message += `${index + 1}. [@${username}](https://instagram.com/${username})\n`;
+        });
+        message += `\n_Use \`/instaremove <username>\` to stop watching._`;
+
+        bot.sendMessage(chatId, message, { parse_mode: 'Markdown', disable_web_page_preview: true });
+    });
+
+    // Handle /instaremove command - remove an Instagram account from watchlist
+    bot.onText(/\/instaremove(?:\s+(.+))?/, (msg, match) => {
+        const chatId = msg.chat.id;
+        const userId = msg.from.id;
+        const username = match[1] ? match[1].trim().toLowerCase().replace(/^@/, '') : null;
+
+        if (!canUseBot(userId)) {
+            bot.sendMessage(chatId, '🔒 Access denied. Send /start to request access.');
+            return;
+        }
+
+        if (!username) {
+            bot.sendMessage(chatId, '❌ Please provide a username.\n\nExample: `/instaremove natgeo`', { parse_mode: 'Markdown' });
+            return;
+        }
+
+        const removed = removeWatchedAccount(userId, username);
+
+        if (removed) {
+            bot.sendMessage(chatId, `✅ Stopped watching @${username}.`);
+        } else {
+            bot.sendMessage(chatId, `❌ You're not watching @${username}.`);
+        }
+    });
+
     // ==================== ADMIN COMMANDS ====================
 
     // Handle /requests command - show pending access requests (admin only)
@@ -919,6 +1050,9 @@ What would you like to do?`;
         { command: 'examstatus', description: 'Check PAI exam status' },
         { command: 'checkreg', description: 'Check if registration is open' },
         { command: 'setpai', description: 'Set PAI login credentials' },
+        { command: 'instawatch', description: 'Watch an Instagram account' },
+        { command: 'instalist', description: 'List watched IG accounts' },
+        { command: 'instaremove', description: 'Stop watching an IG account' },
         { command: 'reminder', description: 'Set your notification interval' },
         { command: 'status', description: 'Bot status info' },
         { command: 'help', description: 'Show help message' }
@@ -984,9 +1118,42 @@ function getBot() {
     return bot;
 }
 
+/**
+ * Sends an Instagram post (image + caption) to a chat
+ * @param {string} chatId - Telegram chat ID
+ * @param {string} username - Instagram username
+ * @param {string} shortcode - Post shortcode
+ */
+async function sendInstagramPost(chatId, username, shortcode) {
+    const post = await downloadPost(shortcode);
+
+    try {
+        // Build caption (Telegram has 1024 char limit for photo captions)
+        let caption = `📸 *@${username}*\n\n`;
+        if (post.caption) {
+            // Truncate caption if too long (reserve space for header + link)
+            const maxCaptionLen = 900;
+            const truncated = post.caption.length > maxCaptionLen
+                ? post.caption.substring(0, maxCaptionLen) + '...'
+                : post.caption;
+            caption += `${truncated}\n\n`;
+        }
+        caption += `🔗 [View on Instagram](${post.permalink})`;
+
+        await bot.sendPhoto(chatId, post.imagePath, {
+            caption: caption,
+            parse_mode: 'Markdown',
+        });
+    } finally {
+        // Always clean up temp files
+        cleanupTmpDir(post.tmpDir);
+    }
+}
+
 module.exports = {
     initBot,
     getBot,
     notifyConfiguredChat,
-    sendNewArticlesNotification
+    sendNewArticlesNotification,
+    sendInstagramPost,
 };

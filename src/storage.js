@@ -7,6 +7,7 @@ const ALLOWED_USERS_FILE = path.join(DATA_DIR, 'allowed_users.json');
 const ACCESS_REQUESTS_FILE = path.join(DATA_DIR, 'access_requests.json');
 const USER_PREFS_FILE = path.join(DATA_DIR, 'user_preferences.json');
 const EXAM_RESULTS_FILE = path.join(DATA_DIR, 'exam_results.json');
+const INSTAGRAM_SEEN_FILE = path.join(DATA_DIR, 'instagram_seen.json');
 
 /**
  * Ensures the data directory exists
@@ -382,6 +383,130 @@ function cacheExamResult(examId, result) {
     saveExamResults(results);
 }
 
+// ==================== INSTAGRAM ====================
+
+/**
+ * Loads seen Instagram post shortcodes from storage
+ * @returns {Object} Object mapping username to array of seen shortcodes
+ */
+function loadSeenPosts() {
+    ensureDataDir();
+
+    if (!fs.existsSync(INSTAGRAM_SEEN_FILE)) {
+        return {};
+    }
+
+    try {
+        const data = fs.readFileSync(INSTAGRAM_SEEN_FILE, 'utf8');
+        return JSON.parse(data) || {};
+    } catch (error) {
+        console.error('Error loading seen posts:', error.message);
+        return {};
+    }
+}
+
+/**
+ * Saves seen Instagram post shortcodes to storage
+ * @param {Object} seenPosts - Object mapping username to array of shortcodes
+ */
+function saveSeenPosts(seenPosts) {
+    ensureDataDir();
+
+    try {
+        fs.writeFileSync(INSTAGRAM_SEEN_FILE, JSON.stringify(seenPosts, null, 2));
+    } catch (error) {
+        console.error('Error saving seen posts:', error.message);
+    }
+}
+
+/**
+ * Gets seen shortcodes for a username
+ * @param {string} username - Instagram username
+ * @returns {Set<string>} Set of seen shortcodes
+ */
+function getSeenPostsForUser(username) {
+    const allSeen = loadSeenPosts();
+    return new Set(allSeen[username] || []);
+}
+
+/**
+ * Marks shortcodes as seen for a username
+ * @param {string} username - Instagram username
+ * @param {Array<string>} shortcodes - Shortcodes to mark as seen
+ */
+function markPostsAsSeen(username, shortcodes) {
+    const allSeen = loadSeenPosts();
+    const existing = new Set(allSeen[username] || []);
+    shortcodes.forEach(sc => existing.add(sc));
+    // Keep only last 200 shortcodes per user to avoid file bloat
+    allSeen[username] = Array.from(existing).slice(-200);
+    saveSeenPosts(allSeen);
+}
+
+/**
+ * Gets watched Instagram accounts for a user
+ * @param {string} userId - Telegram user ID
+ * @returns {Array<string>} Array of Instagram usernames
+ */
+function getWatchedAccounts(userId) {
+    return getUserPreference(userId, 'instaWatchList', []);
+}
+
+/**
+ * Adds an Instagram account to a user's watchlist
+ * @param {string} userId - Telegram user ID
+ * @param {string} username - Instagram username
+ * @returns {boolean} True if added, false if already watching
+ */
+function addWatchedAccount(userId, username) {
+    const watchList = getWatchedAccounts(userId);
+    const normalized = username.toLowerCase().replace(/^@/, '');
+    if (watchList.includes(normalized)) return false;
+    watchList.push(normalized);
+    setUserPreference(userId, 'instaWatchList', watchList);
+    return true;
+}
+
+/**
+ * Removes an Instagram account from a user's watchlist
+ * @param {string} userId - Telegram user ID
+ * @param {string} username - Instagram username
+ * @returns {boolean} True if removed, false if not found
+ */
+function removeWatchedAccount(userId, username) {
+    const watchList = getWatchedAccounts(userId);
+    const normalized = username.toLowerCase().replace(/^@/, '');
+    const index = watchList.indexOf(normalized);
+    if (index === -1) return false;
+    watchList.splice(index, 1);
+    setUserPreference(userId, 'instaWatchList', watchList);
+    return true;
+}
+
+/**
+ * Gets all unique watched Instagram accounts across all users with their watchers
+ * @returns {Array<{username: string, watchers: string[]}>}
+ */
+function getAllWatchedAccounts() {
+    const prefs = loadUserPreferences();
+    const accountMap = {};
+
+    for (const [userId, userPrefs] of Object.entries(prefs)) {
+        const watchList = userPrefs.instaWatchList || [];
+        for (const username of watchList) {
+            if (!accountMap[username]) {
+                accountMap[username] = [];
+            }
+            accountMap[username].push(userId);
+        }
+    }
+
+    return Object.entries(accountMap).map(([username, watchers]) => ({
+        username,
+        watchers,
+    }));
+}
+
 module.exports = {
     loadSeenArticles,
     saveSeenArticles,
@@ -409,5 +534,14 @@ module.exports = {
     loadExamResults,
     saveExamResults,
     getCachedExamResult,
-    cacheExamResult
+    cacheExamResult,
+    // Instagram
+    loadSeenPosts,
+    saveSeenPosts,
+    getSeenPostsForUser,
+    markPostsAsSeen,
+    getWatchedAccounts,
+    addWatchedAccount,
+    removeWatchedAccount,
+    getAllWatchedAccounts,
 };

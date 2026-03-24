@@ -1,9 +1,10 @@
 require('dotenv').config();
 
 const cron = require('node-cron');
-const { initBot, sendNewArticlesNotification, getBot } = require('./telegram');
+const { initBot, sendNewArticlesNotification, getBot, sendInstagramPost } = require('./telegram');
 const { scrapeArticles } = require('./scraper');
 const { checkRegistrationOpen, getSession } = require('./examMonitor');
+const { fetchShortcodes } = require('./instagramMonitor');
 const {
     loadSeenArticles,
     getNewArticles,
@@ -11,7 +12,10 @@ const {
     saveSeenArticles,
     getAllUsersWithReminders,
     getUserPreference,
-    setUserPreference
+    setUserPreference,
+    getAllWatchedAccounts,
+    getSeenPostsForUser,
+    markPostsAsSeen,
 } = require('./storage');
 
 // Track last check time per user for interval-based scheduling
@@ -152,6 +156,109 @@ async function runPerUserChecks() {
 }
 
 /**
+ * Checks all watched Instagram accounts for new posts
+ * @param {boolean} isFirstRun - If true, send latest post; otherwise notify only for new posts
+ */
+async function checkInstagramUpdates(isFirstRun = false) {
+    const watchedAccounts = getAllWatchedAccounts();
+
+    if (watchedAccounts.length === 0) {
+        console.log(`[${new Date().toISOString()}] No Instagram accounts being watched.`);
+        return;
+    }
+
+    console.log(`[${new Date().toISOString()}] Checking ${watchedAccounts.length} Instagram account(s)...`);
+    const bot = getBot();
+    if (!bot) return;
+
+    for (const { username, watchers } of watchedAccounts) {
+        try {
+            // Notify watchers that we're checking
+            if (!isFirstRun) {
+                for (const userId of watchers) {
+                    try {
+                        await bot.sendMessage(userId, `🔍 Checking latest IG post from @${username}...`);
+                    } catch (e) {
+                        console.error(`[Instagram] Failed to send status to ${userId}:`, e.message);
+                    }
+                }
+            }
+
+            const posts = await fetchShortcodes(username);
+
+            if (posts.length === 0) {
+                console.log(`[${new Date().toISOString()}] No posts found for @${username}`);
+                continue;
+            }
+
+            const seenPosts = getSeenPostsForUser(username);
+
+            if (isFirstRun && seenPosts.size === 0) {
+                // First run: send the latest post and mark all as seen
+                console.log(`[${new Date().toISOString()}] First run for @${username} - sending latest post`);
+                const latestPost = posts[0];
+
+                for (const userId of watchers) {
+                    try {
+                        await sendInstagramPost(userId, username, latestPost.shortcode);
+                    } catch (e) {
+                        console.error(`[Instagram] Failed to send to ${userId}:`, e.message);
+                    }
+                }
+
+                // Mark all current posts as seen
+                markPostsAsSeen(username, posts.map(p => p.shortcode));
+            } else {
+                // Regular check: find new posts
+                const newPosts = posts.filter(p => !seenPosts.has(p.shortcode));
+
+                if (newPosts.length === 0) {
+                    console.log(`[${new Date().toISOString()}] No new posts from @${username}`);
+                    for (const userId of watchers) {
+                        try {
+                            await bot.sendMessage(userId, `✅ No new posts from @${username}.`);
+                        } catch (e) {
+                            console.error(`[Instagram] Failed to send to ${userId}:`, e.message);
+                        }
+                    }
+                } else {
+                    console.log(`[${new Date().toISOString()}] Found ${newPosts.length} new post(s) from @${username}!`);
+
+                    // Send newest posts first (they're already sorted newest-first from API)
+                    for (const post of newPosts) {
+                        for (const userId of watchers) {
+                            try {
+                                await sendInstagramPost(userId, username, post.shortcode);
+                            } catch (e) {
+                                console.error(`[Instagram] Failed to send post ${post.shortcode} to ${userId}:`, e.message);
+                            }
+                        }
+                    }
+
+                    // Mark new posts as seen
+                    markPostsAsSeen(username, newPosts.map(p => p.shortcode));
+                }
+            }
+
+            // Small delay between accounts to avoid rate limiting
+            await new Promise(resolve => setTimeout(resolve, 3000));
+
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] Error checking @${username}:`, error.message);
+
+            // Notify watchers of error
+            for (const userId of watchers) {
+                try {
+                    await bot.sendMessage(userId, `⚠️ Error checking @${username}: ${error.message}`);
+                } catch (e) {
+                    // ignore
+                }
+            }
+        }
+    }
+}
+
+/**
  * Test mode - runs scraper once and shows results without sending notifications
  */
 async function runTestMode() {
@@ -218,13 +325,24 @@ async function main() {
     console.log('\n📡 Running initial check...');
     await checkForUpdates(true);
 
+    // Run initial Instagram check
+    console.log('\n📸 Running initial Instagram check...');
+    await checkInstagramUpdates(true);
+
     // Schedule per-user checks every minute (the function checks individual intervals)
     cron.schedule('* * * * *', async () => {
         await runPerUserChecks();
     });
 
+    // Schedule Instagram checks daily at 8 AM
+    cron.schedule('0 8 * * *', async () => {
+        console.log(`\n[${new Date().toISOString()}] Running daily Instagram check...`);
+        await checkInstagramUpdates(false);
+    });
+
     console.log(`\n✅ Bot is running!`);
     console.log(`🔄 Per-user reminders enabled (users set their own intervals with /reminder)`);
+    console.log(`📸 Instagram check scheduled daily at 8 AM`);
     console.log(`💬 Send /start to your bot to get started\n`);
 
     // Graceful shutdown handling
