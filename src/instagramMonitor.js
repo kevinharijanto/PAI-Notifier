@@ -7,8 +7,34 @@ const os = require('os');
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36';
 const IG_APP_ID = '936619743392459';
 
+// Hardcoded cookies from browser incognito session
+const HARDCODED_COOKIES = {
+    csrftoken: 'J_WczZksXBURsP_yf1d_YS',
+    datr: 'H9XCafbNnRyztNZxE7DzK6gw',
+    ig_did: '05A82E8C-6D87-497D-8C58-9890E238E602',
+    mid: 'acLVIAALAAGrTKzVc8HmSvnE1o96',
+    ig_nrcb: '1',
+    ps_l: '1',
+    ps_n: '1',
+};
+
 /**
- * Fetches fresh anonymous cookies from instagram.com
+ * Gets cookies - uses hardcoded cookies first, falls back to auto-refresh
+ * @returns {Promise<Object>} Cookie object
+ */
+async function getCookies() {
+    // Try hardcoded cookies first
+    if (HARDCODED_COOKIES.csrftoken) {
+        console.log('[Instagram] Using hardcoded cookies');
+        return HARDCODED_COOKIES;
+    }
+
+    // Fallback: fetch fresh cookies
+    return await refreshCookies();
+}
+
+/**
+ * Fetches fresh anonymous cookies from instagram.com (fallback)
  * @returns {Promise<Object>} Cookie object with csrftoken, mid, datr, etc.
  */
 async function refreshCookies() {
@@ -35,7 +61,6 @@ async function refreshCookies() {
     }
 
     if (!cookies.csrftoken) {
-        // Try to extract csrftoken from HTML as fallback
         const csrfMatch = resp.data && typeof resp.data === 'string'
             ? resp.data.match(/"csrf_token":"([^"]+)"/)
             : null;
@@ -67,7 +92,8 @@ async function fetchShortcodes(username, maxRetries = 3) {
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
-            const cookies = await refreshCookies();
+            // First attempt: use hardcoded cookies. Retries: try fresh cookies
+            const cookies = attempt === 0 ? await getCookies() : await refreshCookies();
 
             const cookieString = Object.entries(cookies)
                 .map(([k, v]) => `${k}=${v}`)
