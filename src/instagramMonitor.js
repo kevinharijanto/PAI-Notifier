@@ -49,61 +49,96 @@ async function refreshCookies() {
 }
 
 /**
+ * Helper: sleep for ms
+ */
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
  * Fetches recent post shortcodes from a public Instagram profile
+ * Includes retry logic with exponential backoff for rate limiting (429)
  * @param {string} username - Instagram username
+ * @param {number} maxRetries - Maximum number of retries (default: 3)
  * @returns {Promise<Array<{shortcode: string, id: string, timestamp: number}>>}
  */
-async function fetchShortcodes(username) {
-    const cookies = await refreshCookies();
+async function fetchShortcodes(username, maxRetries = 3) {
+    const retryDelays = [10000, 30000, 60000]; // 10s, 30s, 60s
 
-    const cookieString = Object.entries(cookies)
-        .map(([k, v]) => `${k}=${v}`)
-        .join('; ');
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+            const cookies = await refreshCookies();
 
-    const url = `https://www.instagram.com/api/v1/users/web_profile_info/?username=${username}&hl=en`;
+            const cookieString = Object.entries(cookies)
+                .map(([k, v]) => `${k}=${v}`)
+                .join('; ');
 
-    console.log(`[Instagram] Fetching posts for @${username}...`);
+            // Small delay between cookie refresh and API call to look more human
+            await sleep(2000);
 
-    const resp = await axios.get(url, {
-        headers: {
-            'User-Agent': USER_AGENT,
-            'Accept': '*/*',
-            'Accept-Language': 'en-GB,en;q=0.9',
-            'Referer': `https://www.instagram.com/${username}/?hl=en`,
-            'X-IG-App-ID': IG_APP_ID,
-            'X-IG-WWW-Claim': '0',
-            'X-Requested-With': 'XMLHttpRequest',
-            'X-CSRFToken': cookies.csrftoken || '',
-            'Sec-Fetch-Dest': 'empty',
-            'Sec-Fetch-Mode': 'cors',
-            'Sec-Fetch-Site': 'same-origin',
-            'Cookie': cookieString,
-        },
-        validateStatus: () => true,
-    });
+            const url = `https://www.instagram.com/api/v1/users/web_profile_info/?username=${username}&hl=en`;
 
-    if (resp.status !== 200) {
-        console.error(`[Instagram] HTTP ${resp.status} for @${username}`);
-        throw new Error(`Instagram API returned HTTP ${resp.status}`);
+            console.log(`[Instagram] Fetching posts for @${username}... (attempt ${attempt + 1}/${maxRetries + 1})`);
+
+            const resp = await axios.get(url, {
+                headers: {
+                    'User-Agent': USER_AGENT,
+                    'Accept': '*/*',
+                    'Accept-Language': 'en-GB,en;q=0.9',
+                    'Referer': `https://www.instagram.com/${username}/?hl=en`,
+                    'X-IG-App-ID': IG_APP_ID,
+                    'X-IG-WWW-Claim': '0',
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'X-CSRFToken': cookies.csrftoken || '',
+                    'Sec-Fetch-Dest': 'empty',
+                    'Sec-Fetch-Mode': 'cors',
+                    'Sec-Fetch-Site': 'same-origin',
+                    'Cookie': cookieString,
+                },
+                validateStatus: () => true,
+            });
+
+            if (resp.status === 429) {
+                if (attempt < maxRetries) {
+                    const delay = retryDelays[attempt] || 60000;
+                    console.warn(`[Instagram] Rate limited (429). Retrying in ${delay / 1000}s...`);
+                    await sleep(delay);
+                    continue;
+                }
+                throw new Error(`Instagram rate limited (429) after ${maxRetries + 1} attempts. Try again later.`);
+            }
+
+            if (resp.status !== 200) {
+                console.error(`[Instagram] HTTP ${resp.status} for @${username}`);
+                throw new Error(`Instagram API returned HTTP ${resp.status}`);
+            }
+
+            const data = resp.data;
+            const user = data?.data?.user;
+
+            if (!user) {
+                throw new Error(`Could not find user @${username}. Profile may be private or doesn't exist.`);
+            }
+
+            const edges = user.edge_owner_to_timeline_media?.edges || [];
+            const totalPosts = user.edge_owner_to_timeline_media?.count || 0;
+
+            console.log(`[Instagram] @${username} has ${totalPosts} total posts, got ${edges.length} latest`);
+
+            return edges.map(edge => ({
+                shortcode: edge.node.shortcode,
+                id: edge.node.id,
+                timestamp: edge.node.taken_at_timestamp,
+            }));
+
+        } catch (error) {
+            // If it's a retry-able error and we have retries left, the loop handles it
+            // Otherwise rethrow
+            if (attempt >= maxRetries || !error.message.includes('429')) {
+                throw error;
+            }
+        }
     }
-
-    const data = resp.data;
-    const user = data?.data?.user;
-
-    if (!user) {
-        throw new Error(`Could not find user @${username}. Profile may be private or doesn't exist.`);
-    }
-
-    const edges = user.edge_owner_to_timeline_media?.edges || [];
-    const totalPosts = user.edge_owner_to_timeline_media?.count || 0;
-
-    console.log(`[Instagram] @${username} has ${totalPosts} total posts, got ${edges.length} latest`);
-
-    return edges.map(edge => ({
-        shortcode: edge.node.shortcode,
-        id: edge.node.id,
-        timestamp: edge.node.taken_at_timestamp,
-    }));
 }
 
 /**
