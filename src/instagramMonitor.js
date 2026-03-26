@@ -7,8 +7,8 @@ const os = require('os');
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36';
 const IG_APP_ID = '936619743392459';
 const COOKIE_CACHE_FILE = path.join(__dirname, '../data/instagram_cookies.json');
-const COOKIE_CACHE_DURATION = 60 * 60 * 1000; // 1 hour
-const MIN_REQUEST_INTERVAL = 30000; // 30 seconds between requests
+const COOKIE_CACHE_DURATION = 2 * 60 * 60 * 1000; // 2 hours
+const MIN_REQUEST_INTERVAL = 60 * 1000; // 1 minute between requests
 
 // Cookie cache state
 let cachedCookies = null;
@@ -24,7 +24,9 @@ async function getCookies() {
 
     // Check if cached cookies are still valid
     if (cachedCookies && cookieExpiry && now < cookieExpiry) {
-        console.log('[Instagram] Using cached cookies (expires in ' + Math.round((cookieExpiry - now) / 1000) + 's)');
+        const remainingSeconds = Math.round((cookieExpiry - now) / 1000);
+        const remainingMinutes = Math.round(remainingSeconds / 60);
+        console.log(`[Instagram] Using cached cookies (expires in ${remainingMinutes}m ${remainingSeconds % 60}s)`);
         return cachedCookies;
     }
 
@@ -61,7 +63,7 @@ async function getCookies() {
             cookies: freshCookies,
             expiry: cookieExpiry
         }));
-        console.log('[Instagram] Cookies cached for 1 hour');
+        console.log('[Instagram] Cookies cached for 2 hours');
     } catch (error) {
         console.warn('[Instagram] Failed to save cookies to cache:', error.message);
     }
@@ -76,11 +78,19 @@ async function getCookies() {
 async function refreshCookies() {
     console.log('[Instagram] Refreshing cookies...');
 
+    // First request to get initial cookies
     const resp = await axios.get('https://www.instagram.com/', {
         headers: {
             'User-Agent': USER_AGENT,
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'en-GB,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Cache-Control': 'max-age=0',
         },
         maxRedirects: 5,
         validateStatus: () => true,
@@ -96,6 +106,7 @@ async function refreshCookies() {
         }
     }
 
+    // Extract csrf_token from HTML if not in cookies
     if (!cookies.csrftoken) {
         const csrfMatch = resp.data && typeof resp.data === 'string'
             ? resp.data.match(/"csrf_token":"([^"]+)"/)
@@ -103,6 +114,43 @@ async function refreshCookies() {
         if (csrfMatch) {
             cookies.csrftoken = csrfMatch[1];
         }
+    }
+
+    // Extract additional cookies from HTML if needed
+    if (resp.data && typeof resp.data === 'string') {
+        // Try to find ig_did in the HTML
+        const igDidMatch = resp.data.match(/"ig_did":"([^"]+)"/);
+        if (igDidMatch && !cookies.ig_did) {
+            cookies.ig_did = igDidMatch[1];
+        }
+
+        // Try to find mid in the HTML
+        const midMatch = resp.data.match(/"mid":"([^"]+)"/);
+        if (midMatch && !cookies.mid) {
+            cookies.mid = midMatch[1];
+        }
+    }
+
+    // Make a second request to a public profile to get more cookies
+    try {
+        const cookieString = Object.entries(cookies)
+            .map(([k, v]) => `${k}=${v}`)
+            .join('; ');
+
+        await axios.get('https://www.instagram.com/instagram/?hl=en', {
+            headers: {
+                'User-Agent': USER_AGENT,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-GB,en;q=0.9',
+                'Referer': 'https://www.instagram.com/',
+                'Cookie': cookieString,
+            },
+            maxRedirects: 5,
+            validateStatus: () => true,
+        });
+    } catch (error) {
+        // Ignore errors on second request
+        console.warn('[Instagram] Second cookie request failed:', error.message);
     }
 
     console.log(`[Instagram] Got cookies: ${Object.keys(cookies).join(', ')}`);
@@ -124,7 +172,7 @@ function sleep(ms) {
  * @returns {Promise<Array<{shortcode: string, id: string, timestamp: number}>>}
  */
 async function fetchShortcodes(username, maxRetries = 5) {
-    const retryDelays = [10000, 30000, 60000, 120000, 300000]; // 10s, 30s, 1m, 2m, 5m
+    const retryDelays = [30000, 60000, 120000, 300000, 600000]; // 30s, 1m, 2m, 5m, 10m
 
     // Enforce minimum interval between requests to avoid rate limiting
     const timeSinceLastRequest = Date.now() - lastRequestTime;
@@ -143,8 +191,10 @@ async function fetchShortcodes(username, maxRetries = 5) {
                 .map(([k, v]) => `${k}=${v}`)
                 .join('; ');
 
-            // Small delay between cookie refresh and API call to look more human
-            await sleep(2000);
+            // Random delay between cookie refresh and API call to look more human (2-5 seconds)
+            const randomDelay = 2000 + Math.random() * 3000;
+            console.log(`[Instagram] Waiting ${Math.round(randomDelay / 1000)}s before request...`);
+            await sleep(randomDelay);
 
             const url = `https://www.instagram.com/api/v1/users/web_profile_info/?username=${username}&hl=en`;
 
