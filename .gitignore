@@ -6,6 +6,7 @@ node_modules/
 
 # Data files (optional - comment out if you want to track)
 # data/seen_articles.json
+data/instagram_cookies.json
 
 # IDE
 .vscode/

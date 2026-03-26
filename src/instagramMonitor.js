@@ -6,31 +6,67 @@ const os = require('os');
 
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36';
 const IG_APP_ID = '936619743392459';
+const COOKIE_CACHE_FILE = path.join(__dirname, '../data/instagram_cookies.json');
+const COOKIE_CACHE_DURATION = 60 * 60 * 1000; // 1 hour
+const MIN_REQUEST_INTERVAL = 30000; // 30 seconds between requests
 
-// Hardcoded cookies from browser incognito session
-const HARDCODED_COOKIES = {
-    csrftoken: 'J_WczZksXBURsP_yf1d_YS',
-    datr: 'H9XCafbNnRyztNZxE7DzK6gw',
-    ig_did: '05A82E8C-6D87-497D-8C58-9890E238E602',
-    mid: 'acLVIAALAAGrTKzVc8HmSvnE1o96',
-    ig_nrcb: '1',
-    ps_l: '1',
-    ps_n: '1',
-};
+// Cookie cache state
+let cachedCookies = null;
+let cookieExpiry = null;
+let lastRequestTime = 0;
 
 /**
- * Gets cookies - uses hardcoded cookies first, falls back to auto-refresh
+ * Gets cookies with caching support
  * @returns {Promise<Object>} Cookie object
  */
 async function getCookies() {
-    // Try hardcoded cookies first
-    if (HARDCODED_COOKIES.csrftoken) {
-        console.log('[Instagram] Using hardcoded cookies');
-        return HARDCODED_COOKIES;
+    const now = Date.now();
+
+    // Check if cached cookies are still valid
+    if (cachedCookies && cookieExpiry && now < cookieExpiry) {
+        console.log('[Instagram] Using cached cookies (expires in ' + Math.round((cookieExpiry - now) / 1000) + 's)');
+        return cachedCookies;
     }
 
-    // Fallback: fetch fresh cookies
-    return await refreshCookies();
+    // Try to load from disk cache
+    try {
+        if (fs.existsSync(COOKIE_CACHE_FILE)) {
+            const cacheData = JSON.parse(fs.readFileSync(COOKIE_CACHE_FILE, 'utf8'));
+            if (cacheData.expiry && now < cacheData.expiry) {
+                console.log('[Instagram] Loaded cookies from disk cache');
+                cachedCookies = cacheData.cookies;
+                cookieExpiry = cacheData.expiry;
+                return cachedCookies;
+            }
+        }
+    } catch (error) {
+        console.warn('[Instagram] Failed to load cookies from cache:', error.message);
+    }
+
+    // Fetch fresh cookies
+    console.log('[Instagram] Fetching fresh cookies...');
+    const freshCookies = await refreshCookies();
+
+    // Cache them with expiry
+    cachedCookies = freshCookies;
+    cookieExpiry = now + COOKIE_CACHE_DURATION;
+
+    // Persist to disk
+    try {
+        const cacheDir = path.dirname(COOKIE_CACHE_FILE);
+        if (!fs.existsSync(cacheDir)) {
+            fs.mkdirSync(cacheDir, { recursive: true });
+        }
+        fs.writeFileSync(COOKIE_CACHE_FILE, JSON.stringify({
+            cookies: freshCookies,
+            expiry: cookieExpiry
+        }));
+        console.log('[Instagram] Cookies cached for 1 hour');
+    } catch (error) {
+        console.warn('[Instagram] Failed to save cookies to cache:', error.message);
+    }
+
+    return freshCookies;
 }
 
 /**
@@ -84,16 +120,24 @@ function sleep(ms) {
  * Fetches recent post shortcodes from a public Instagram profile
  * Includes retry logic with exponential backoff for rate limiting (429)
  * @param {string} username - Instagram username
- * @param {number} maxRetries - Maximum number of retries (default: 3)
+ * @param {number} maxRetries - Maximum number of retries (default: 5)
  * @returns {Promise<Array<{shortcode: string, id: string, timestamp: number}>>}
  */
-async function fetchShortcodes(username, maxRetries = 3) {
-    const retryDelays = [10000, 30000, 60000]; // 10s, 30s, 60s
+async function fetchShortcodes(username, maxRetries = 5) {
+    const retryDelays = [10000, 30000, 60000, 120000, 300000]; // 10s, 30s, 1m, 2m, 5m
+
+    // Enforce minimum interval between requests to avoid rate limiting
+    const timeSinceLastRequest = Date.now() - lastRequestTime;
+    if (timeSinceLastRequest < MIN_REQUEST_INTERVAL) {
+        const waitTime = MIN_REQUEST_INTERVAL - timeSinceLastRequest;
+        console.log(`[Instagram] Throttling: waiting ${waitTime / 1000}s before request`);
+        await sleep(waitTime);
+    }
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
-            // First attempt: use hardcoded cookies. Retries: try fresh cookies
-            const cookies = attempt === 0 ? await getCookies() : await refreshCookies();
+            // Always use fresh cookies from cache or refresh
+            const cookies = await getCookies();
 
             const cookieString = Object.entries(cookies)
                 .map(([k, v]) => `${k}=${v}`)
@@ -124,9 +168,12 @@ async function fetchShortcodes(username, maxRetries = 3) {
                 validateStatus: () => true,
             });
 
+            // Update last request time on successful request
+            lastRequestTime = Date.now();
+
             if (resp.status === 429) {
                 if (attempt < maxRetries) {
-                    const delay = retryDelays[attempt] || 60000;
+                    const delay = retryDelays[attempt] || 300000;
                     console.warn(`[Instagram] Rate limited (429). Retrying in ${delay / 1000}s...`);
                     await sleep(delay);
                     continue;
@@ -253,6 +300,7 @@ function cleanupTmpDir(dirPath) {
 }
 
 module.exports = {
+    getCookies,
     refreshCookies,
     fetchShortcodes,
     downloadPost,

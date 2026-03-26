@@ -335,10 +335,13 @@ async function main() {
         await runPerUserChecks();
     });
 
-    // Schedule Instagram checks daily at 8 AM
-    cron.schedule('0 8 * * *', async () => {
-        console.log(`\n[${new Date().toISOString()}] Running daily Instagram check...`);
+    // Schedule Instagram checks daily at 8 AM GMT+7 (Asia/Jakarta)
+    // 8 AM GMT+7 = 1 AM UTC
+    cron.schedule('0 1 * * *', async () => {
+        console.log(`\n[${new Date().toISOString()}] Running daily Instagram check (8 AM GMT+7)...`);
         await checkInstagramUpdates(false);
+    }, {
+        timezone: 'Asia/Jakarta'
     });
 
     console.log(`\n✅ Bot is running!`);
