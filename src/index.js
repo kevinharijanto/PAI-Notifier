@@ -4,7 +4,7 @@ const cron = require('node-cron');
 const { initBot, sendNewArticlesNotification, getBot, sendInstagramPost } = require('./telegram');
 const { scrapeArticles } = require('./scraper');
 const { checkRegistrationOpen, getSession } = require('./examMonitor');
-const { fetchShortcodes } = require('./instagramMonitor');
+const { fetchPosts } = require('./instagramMonitor');
 const {
     loadSeenArticles,
     getNewArticles,
@@ -24,6 +24,7 @@ const {
 const userLastCheck = new Map();
 // Track last known registration status to detect changes
 let lastRegistrationOpen = false;
+const INSTAGRAM_USERNAME = 'aktuarisindonesia';
 const INSTAGRAM_STARTUP_COOLDOWN_MINUTES = Number.parseInt(process.env.INSTAGRAM_STARTUP_COOLDOWN_MINUTES || '1200', 10);
 const INSTAGRAM_STARTUP_COOLDOWN_MS = (
     Number.isFinite(INSTAGRAM_STARTUP_COOLDOWN_MINUTES) && INSTAGRAM_STARTUP_COOLDOWN_MINUTES > 0
@@ -248,7 +249,7 @@ async function legacyCheckInstagramUpdates(isFirstRun = false) {
 
             for (const userId of recipients) {
                 try {
-                    await sendInstagramPost(userId, username, latestPost.shortcode);
+                    await sendInstagramPost(userId, username, latestPost);
                 } catch (e) {
                     console.error(`[Instagram] Failed to send to ${userId}:`, e.message);
                 }
@@ -275,7 +276,7 @@ async function legacyCheckInstagramUpdates(isFirstRun = false) {
                 for (const post of newPosts) {
                     for (const userId of recipients) {
                         try {
-                            await sendInstagramPost(userId, username, post.shortcode);
+                            await sendInstagramPost(userId, username, post);
                         } catch (e) {
                             console.error(`[Instagram] Failed to send post ${post.shortcode} to ${userId}:`, e.message);
                         }
@@ -309,101 +310,102 @@ async function runInstagramNotifierChecks(isFirstRun = false) {
     const bot = getBot();
     if (!bot) return;
 
-    const watchedAccounts = getAllWatchedAccounts();
+    const accountWatch = getAllWatchedAccounts().find(account => account.username === INSTAGRAM_USERNAME);
     const adminId = process.env.ADMIN_CHAT_ID;
 
-    if (watchedAccounts.length === 0) {
-        console.log(`[${new Date().toISOString()}] No watched Instagram accounts configured.`);
+    if (!accountWatch) {
+        console.log(`[${new Date().toISOString()}] No subscribers for Instagram @${INSTAGRAM_USERNAME}.`);
         return;
     }
 
-    for (const { username, watchers } of watchedAccounts) {
-        const recipients = new Set(watchers.map(userId => String(userId)));
-        if (adminId) recipients.add(String(adminId));
+    const username = INSTAGRAM_USERNAME;
+    const recipients = new Set(accountWatch.watchers.map(userId => String(userId)));
+    if (adminId) recipients.add(String(adminId));
 
-        if (recipients.size === 0) {
-            continue;
+    if (recipients.size === 0) {
+        return;
+    }
+
+    const seenPosts = getSeenPostsForUser(username);
+    if (isFirstRun) {
+        const skipReason = getInstagramStartupSkipReason(username, seenPosts);
+        if (skipReason) {
+            console.log(`[${new Date().toISOString()}] Skipping startup Instagram check for @${username}: ${skipReason}.`);
+            return;
+        }
+    }
+
+    console.log(`[${new Date().toISOString()}] Checking Instagram @${username} for ${recipients.size} recipient(s)...`);
+    updateInstagramState(username, {
+        lastAttemptAt: new Date().toISOString(),
+    });
+
+    try {
+        const posts = await fetchPosts(username);
+
+        if (posts.length === 0) {
+            console.log(`[${new Date().toISOString()}] No posts found for @${username}`);
+            updateInstagramState(username, {
+                lastSuccessAt: new Date().toISOString(),
+                lastError: null,
+                lastPostCount: 0,
+            });
+            return;
         }
 
-        const seenPosts = getSeenPostsForUser(username);
-        if (isFirstRun) {
-            const skipReason = getInstagramStartupSkipReason(username, seenPosts);
-            if (skipReason) {
-                console.log(`[${new Date().toISOString()}] Skipping startup Instagram check for @${username}: ${skipReason}.`);
-                continue;
-            }
-        }
+        if (isFirstRun && seenPosts.size === 0) {
+            console.log(`[${new Date().toISOString()}] First run for @${username} - sending 3 latest posts`);
+            const latestPosts = posts.slice(0, 3); // Fetch 3 latest posts on first run
 
-        console.log(`[${new Date().toISOString()}] Checking Instagram @${username} for ${recipients.size} recipient(s)...`);
-        updateInstagramState(username, {
-            lastAttemptAt: new Date().toISOString(),
-        });
-
-        try {
-            const posts = await fetchShortcodes(username);
-
-            if (posts.length === 0) {
-                console.log(`[${new Date().toISOString()}] No posts found for @${username}`);
-                updateInstagramState(username, {
-                    lastSuccessAt: new Date().toISOString(),
-                    lastError: null,
-                    lastPostCount: 0,
-                });
-                continue;
-            }
-
-            if (isFirstRun && seenPosts.size === 0) {
-                console.log(`[${new Date().toISOString()}] First run for @${username} - sending latest post`);
-                const latestPost = posts[0];
-
+            for (const latestPost of latestPosts) {
                 for (const userId of recipients) {
                     try {
-                        await sendInstagramPost(userId, username, latestPost.shortcode);
+                        await sendInstagramPost(userId, username, latestPost);
                     } catch (e) {
                         console.error(`[Instagram] Failed to send @${username} to ${userId}:`, e.message);
                     }
                 }
-
-                markPostsAsSeen(username, posts.map(p => p.shortcode));
-            } else {
-                const newPosts = posts.filter(p => !seenPosts.has(p.shortcode));
-
-                if (newPosts.length === 0) {
-                    console.log(`[${new Date().toISOString()}] No new posts from @${username}`);
-                } else {
-                    console.log(`[${new Date().toISOString()}] Found ${newPosts.length} new post(s) from @${username}!`);
-
-                    for (const post of newPosts) {
-                        for (const userId of recipients) {
-                            try {
-                                await sendInstagramPost(userId, username, post.shortcode);
-                            } catch (e) {
-                                console.error(`[Instagram] Failed to send post ${post.shortcode} from @${username} to ${userId}:`, e.message);
-                            }
-                        }
-                    }
-
-                    markPostsAsSeen(username, newPosts.map(p => p.shortcode));
-                }
             }
 
-            updateInstagramState(username, {
-                lastSuccessAt: new Date().toISOString(),
-                lastError: null,
-                lastPostCount: posts.length,
-            });
-        } catch (error) {
-            console.error(`[${new Date().toISOString()}] Error checking @${username}:`, error.message);
-            updateInstagramState(username, {
-                lastError: error.message,
-            });
+            markPostsAsSeen(username, posts.map(p => p.shortcode));
+        } else {
+            const newPosts = posts.filter(p => !seenPosts.has(p.shortcode));
 
-            for (const userId of recipients) {
-                try {
-                    await bot.sendMessage(userId, `⚠️ Error checking @${username}: ${error.message}`);
-                } catch (e) {
-                    // ignore
+            if (newPosts.length === 0) {
+                console.log(`[${new Date().toISOString()}] No new posts from @${username}`);
+            } else {
+                console.log(`[${new Date().toISOString()}] Found ${newPosts.length} new post(s) from @${username}!`);
+
+                for (const post of newPosts) {
+                    for (const userId of recipients) {
+                        try {
+                            await sendInstagramPost(userId, username, post);
+                        } catch (e) {
+                            console.error(`[Instagram] Failed to send post ${post.shortcode} from @${username} to ${userId}:`, e.message);
+                        }
+                    }
                 }
+
+                markPostsAsSeen(username, newPosts.map(p => p.shortcode));
+            }
+        }
+
+        updateInstagramState(username, {
+            lastSuccessAt: new Date().toISOString(),
+            lastError: null,
+            lastPostCount: posts.length,
+        });
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] Error checking @${username}:`, error.message);
+        updateInstagramState(username, {
+            lastError: error.message,
+        });
+
+        for (const userId of recipients) {
+            try {
+                await bot.sendMessage(userId, `⚠️ Error checking @${username}: ${error.message}`);
+            } catch (e) {
+                // ignore
             }
         }
     }

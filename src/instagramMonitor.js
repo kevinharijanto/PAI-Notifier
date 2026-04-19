@@ -532,10 +532,85 @@ function cleanupTmpDir(dirPath) {
     }
 }
 
+async function fetchPostsFromDolphinRadar(username) {
+    const url = `https://www.dolphinradar.com/api/ins/story/story/search?media_name=${username}&type=post`;
+    try {
+        console.log(`[Instagram] Fetching posts for @${username} via DolphinRadar...`);
+        const resp = await axios.get(url, {
+            headers: {
+                'User-Agent': USER_AGENT,
+                'Accept': 'application/json'
+            },
+            timeout: 10000
+        });
+
+        if (resp.status !== 200) {
+            throw new Error(`DolphinRadar API returned HTTP ${resp.status}`);
+        }
+
+        const data = resp.data;
+        if (data.code !== 0) {
+            throw new Error(`DolphinRadar API returned error code ${data.code}`);
+        }
+
+        const posts = data.data?.post_list || [];
+        
+        return posts.map(post => {
+            // Calculate timestamp from publish_time (adjusting for potential timezone issues, though it should be ordering-safe)
+            const timestamp = post.publish_time ? new Date(post.publish_time).getTime() / 1000 : Math.floor(Date.now() / 1000);
+            
+            // Collect media
+            let mediaUrls = [];
+            if (post.media_list && post.media_list.length > 0) {
+                 mediaUrls = post.media_list.map(m => m.media_url).filter(Boolean);
+            } else if (post.cover_image) {
+                 mediaUrls = [post.cover_image];
+            }
+
+            return {
+                shortcode: post.code,
+                id: post.code,
+                timestamp: timestamp || Math.floor(Date.now() / 1000),
+                caption: post.caption || '',
+                permalink: `https://www.instagram.com/p/${post.code}/`,
+                mediaUrls: mediaUrls,
+                isDolphinRadar: true
+            };
+        });
+    } catch (error) {
+        console.warn(`[Instagram] DolphinRadar fetch failed for @${username}: ${error.message}`);
+        throw error;
+    }
+}
+
+async function fetchPosts(username, maxRetries = 5) {
+    try {
+        const drPosts = await fetchPostsFromDolphinRadar(username);
+        // If it successfully returns a populated list, return it
+        if (drPosts && drPosts.length > 0) {
+            console.log(`[Instagram] Got ${drPosts.length} posts from DolphinRadar for @${username}`);
+            return drPosts;
+        } else {
+            console.log(`[Instagram] DolphinRadar returned empty for @${username}, falling back to web fetch...`);
+        }
+    } catch (err) {
+        console.warn(`[Instagram] DolphinRadar failed, falling back to legacy...`);
+    }
+
+    // fallback to legacy fetchShortcodes
+    const shortcodes = await fetchShortcodes(username, maxRetries);
+    return shortcodes.map(s => ({
+        ...s,
+        isLegacy: true
+    }));
+}
+
 module.exports = {
     getCookies,
     refreshCookies,
     fetchShortcodes,
+    fetchPostsFromDolphinRadar,
+    fetchPosts,
     downloadPost,
     cleanupTmpDir,
 };

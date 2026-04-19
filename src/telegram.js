@@ -1,7 +1,7 @@
 const TelegramBot = require('node-telegram-bot-api');
 const { scrapeArticles } = require('./scraper');
 const { fetchExamListForUser, fetchExamResultPdf, getSession, checkRegistrationOpen } = require('./examMonitor');
-const { fetchShortcodes, downloadPost, cleanupTmpDir } = require('./instagramMonitor');
+const { fetchPosts, downloadPost, cleanupTmpDir } = require('./instagramMonitor');
 const {
     loadSeenArticles,
     getNewArticles,
@@ -24,6 +24,7 @@ const {
 } = require('./storage');
 
 let bot = null;
+const INSTAGRAM_USERNAME = 'aktuarisindonesia';
 
 /**
  * Gets the admin chat ID from environment
@@ -113,9 +114,9 @@ Your Chat ID is: \`${chatId}\`
 /examstatus - Check PAI exam status
 /checkreg - Check if registration is open
 /setpai - Set PAI login credentials
-/instawatch - Watch an Instagram account
-/instalist - List watched IG accounts
-/instaremove - Stop watching an IG account
+/instawatch - Subscribe to @aktuarisindonesia
+/instalist - Show Instagram subscription
+/instaremove - Stop Instagram notifications
 /help - Show this help message`;
 
             if (isAdmin(userId)) {
@@ -158,9 +159,9 @@ Your User ID: \`${userId}\``;
 /status - Show bot status and last check time
 
 *Instagram:*
-/instawatch \<username\> - Watch an IG account
-/instalist - List watched accounts
-/instaremove \<username\> - Stop watching
+/instawatch - Subscribe to *@aktuarisindonesia*
+/instalatest - Manually list 3 latest Instagram posts
+/instaremove - Stop Instagram notifications
 
 /help - Show this help message
 
@@ -576,14 +577,22 @@ Instagram is checked daily at 8 AM.`;
     bot.onText(/\/instawatch(?:\s+(.+))?/, async (msg, match) => {
         const chatId = msg.chat.id;
         const userId = msg.from.id;
-        const username = match[1] ? match[1].trim().toLowerCase().replace(/^@/, '') : null;
+        const requestedUsername = match[1] ? match[1].trim().toLowerCase().replace(/^@/, '') : null;
+        const username = INSTAGRAM_USERNAME;
 
         if (!canUseBot(userId)) {
             bot.sendMessage(chatId, '🔒 Access denied. Send /start to request access.');
             return;
         }
 
-        if (!username) {
+        if (requestedUsername && requestedUsername !== username) {
+            bot.sendMessage(chatId, `This bot only monitors *@${username}*. Use \`/instawatch\` without a username.`, {
+                parse_mode: 'Markdown'
+            });
+            return;
+        }
+
+        if (requestedUsername && requestedUsername !== username) {
             bot.sendMessage(chatId, '❌ Please provide a username.\n\nExample: `/instawatch natgeo`', { parse_mode: 'Markdown' });
             return;
         }
@@ -647,6 +656,20 @@ Instagram is checked daily at 8 AM.`;
         }
 
         const watchList = getWatchedAccounts(userId);
+        const isSubscribed = watchList.includes(INSTAGRAM_USERNAME);
+
+        if (!isSubscribed) {
+            bot.sendMessage(chatId, `You're not subscribed to *@${INSTAGRAM_USERNAME}*.\n\nUse \`/instawatch\` to enable Instagram notifications.`, {
+                parse_mode: 'Markdown'
+            });
+            return;
+        }
+
+        let subscriptionMessage = `*Instagram Subscription*\n\n`;
+        subscriptionMessage += `You're subscribed to [@${INSTAGRAM_USERNAME}](https://instagram.com/${INSTAGRAM_USERNAME}).\n`;
+        subscriptionMessage += `\n_Use \`/instaremove\` to stop Instagram notifications._`;
+        bot.sendMessage(chatId, subscriptionMessage, { parse_mode: 'Markdown', disable_web_page_preview: true });
+        return;
 
         if (watchList.length === 0) {
             bot.sendMessage(chatId, '📭 You\'re not watching any Instagram accounts.\n\nUse `/instawatch <username>` to start watching.', { parse_mode: 'Markdown' });
@@ -666,10 +689,18 @@ Instagram is checked daily at 8 AM.`;
     bot.onText(/\/instaremove(?:\s+(.+))?/, (msg, match) => {
         const chatId = msg.chat.id;
         const userId = msg.from.id;
-        const username = match[1] ? match[1].trim().toLowerCase().replace(/^@/, '') : null;
+        const requestedUsername = match[1] ? match[1].trim().toLowerCase().replace(/^@/, '') : null;
+        const username = INSTAGRAM_USERNAME;
 
         if (!canUseBot(userId)) {
             bot.sendMessage(chatId, '🔒 Access denied. Send /start to request access.');
+            return;
+        }
+
+        if (requestedUsername && requestedUsername !== username) {
+            bot.sendMessage(chatId, `This bot only monitors *@${username}*. Use \`/instaremove\` without a username.`, {
+                parse_mode: 'Markdown'
+            });
             return;
         }
 
@@ -681,9 +712,47 @@ Instagram is checked daily at 8 AM.`;
         const removed = removeWatchedAccount(userId, username);
 
         if (removed) {
+            bot.sendMessage(chatId, `Stopped Instagram notifications for *@${username}*.`, { parse_mode: 'Markdown' });
+            return;
+        }
+
+        bot.sendMessage(chatId, `You're not subscribed to *@${username}*.`, { parse_mode: 'Markdown' });
+        return;
+
+        if (removed) {
             bot.sendMessage(chatId, `✅ Stopped watching @${username}.`);
         } else {
             bot.sendMessage(chatId, `❌ You're not watching @${username}.`);
+        }
+    });
+
+    // Handle /instalatest command - manually fetch latest 3 posts
+    bot.onText(/\/instalatest/, async (msg) => {
+        const chatId = msg.chat.id;
+        const userId = msg.from.id;
+        const username = INSTAGRAM_USERNAME;
+
+        if (!canUseBot(userId)) {
+            bot.sendMessage(chatId, '🔒 Access denied. Send /start to request access.');
+            return;
+        }
+
+        try {
+            bot.sendMessage(chatId, `🔍 Fetching latest posts for @${username}...`);
+            const posts = await fetchPosts(username);
+
+            if (!posts || posts.length === 0) {
+                bot.sendMessage(chatId, `❌ No posts found for @${username}.`);
+                return;
+            }
+
+            const latestPosts = posts.slice(0, 3);
+            for (const post of latestPosts) {
+                await sendInstagramPost(chatId, username, post);
+            }
+        } catch (error) {
+            console.error('[Instagram] Error manual fetch:', error);
+            bot.sendMessage(chatId, `❌ Error fetching latest Instagram posts: ${error.message}`);
         }
     });
 
@@ -1050,9 +1119,10 @@ What would you like to do?`;
         { command: 'examstatus', description: 'Check PAI exam status' },
         { command: 'checkreg', description: 'Check if registration is open' },
         { command: 'setpai', description: 'Set PAI login credentials' },
-        { command: 'instawatch', description: 'Watch an Instagram account' },
-        { command: 'instalist', description: 'List watched IG accounts' },
-        { command: 'instaremove', description: 'Stop watching an IG account' },
+        { command: 'instawatch', description: 'Subscribe to @aktuarisindonesia' },
+        { command: 'instalist', description: 'Show Instagram subscription' },
+        { command: 'instalatest', description: 'Show 3 latest Instagram posts' },
+        { command: 'instaremove', description: 'Stop Instagram notifications' },
         { command: 'reminder', description: 'Set your notification interval' },
         { command: 'status', description: 'Bot status info' },
         { command: 'help', description: 'Show help message' }
@@ -1122,13 +1192,25 @@ function getBot() {
  * Sends an Instagram post (image + caption) to a chat
  * @param {string} chatId - Telegram chat ID
  * @param {string} username - Instagram username
- * @param {string} shortcode - Post shortcode
+ * @param {Object|string} postOrShortcode - Post object or shortcode
  */
-async function sendInstagramPost(chatId, username, shortcode) {
-    const post = await downloadPost(shortcode);
+async function sendInstagramPost(chatId, username, postOrShortcode) {
+    let post;
+    let isLegacy = false;
+
+    if (typeof postOrShortcode === 'string') {
+        post = await downloadPost(postOrShortcode);
+        isLegacy = true;
+    } else {
+        post = postOrShortcode;
+        if (post.isLegacy) {
+            post = await downloadPost(post.shortcode);
+            isLegacy = true;
+        }
+    }
 
     try {
-        // Build caption (Telegram has 1024 char limit for photo captions)
+        // Build caption (Telegram has 1024 char limit for media captions)
         let caption = `📸 *@${username}*\n\n`;
         if (post.caption) {
             // Truncate caption if too long (reserve space for header + link)
@@ -1140,13 +1222,41 @@ async function sendInstagramPost(chatId, username, shortcode) {
         }
         caption += `🔗 [View on Instagram](${post.permalink})`;
 
-        await bot.sendPhoto(chatId, post.imagePath, {
-            caption: caption,
-            parse_mode: 'Markdown',
-        });
+        if (isLegacy) {
+            await bot.sendPhoto(chatId, post.imagePath, {
+                caption: caption,
+                parse_mode: 'Markdown',
+            });
+        } else {
+            const mediaUrls = post.mediaUrls || [];
+            if (mediaUrls.length > 1) {
+                // Send multiple images as a media group
+                const mediaGroup = mediaUrls.map((url, i) => {
+                    const mediaItem = { type: 'photo', media: url };
+                    if (i === 0) {
+                        mediaItem.caption = caption;
+                        mediaItem.parse_mode = 'Markdown';
+                    }
+                    return mediaItem;
+                });
+                await bot.sendMediaGroup(chatId, mediaGroup);
+            } else if (mediaUrls.length === 1) {
+                // Send single image
+                await bot.sendPhoto(chatId, mediaUrls[0], {
+                    caption: caption,
+                    parse_mode: 'Markdown',
+                });
+            } else {
+                // Fallback text format
+                await bot.sendMessage(chatId, caption, {
+                    parse_mode: 'Markdown',
+                });
+            }
+        }
     } finally {
-        // Always clean up temp files
-        cleanupTmpDir(post.tmpDir);
+        if (isLegacy && post && post.tmpDir) {
+            cleanupTmpDir(post.tmpDir);
+        }
     }
 }
 
