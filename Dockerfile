@@ -16,6 +16,9 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
+# Skip downloading Puppeteer's internal Chromium since we installed it via apk
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+
 # Install dependencies
 RUN npm ci --only=production
 

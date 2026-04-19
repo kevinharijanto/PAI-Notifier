@@ -746,7 +746,7 @@ Instagram is checked daily at 8 AM.`;
                 return;
             }
 
-            const latestPosts = posts.slice(0, 3);
+            const latestPosts = posts.slice(0, 1);
             for (const post of latestPosts) {
                 await sendInstagramPost(chatId, username, post);
             }
@@ -1196,20 +1196,18 @@ function getBot() {
  */
 async function sendInstagramPost(chatId, username, postOrShortcode) {
     let post;
-    let isLegacy = false;
+    let isDownloaded = false;
 
     if (typeof postOrShortcode === 'string') {
         post = await downloadPost(postOrShortcode);
-        isLegacy = true;
+        isDownloaded = true;
     } else {
         post = postOrShortcode;
-        if (post.isLegacy) {
-            post = await downloadPost(post.shortcode);
-            isLegacy = true;
-        }
     }
 
     try {
+        const permalink = post.permalink || `https://www.instagram.com/p/${post.shortcode}/`;
+        
         // Build caption (Telegram has 1024 char limit for media captions)
         let caption = `📸 *@${username}*\n\n`;
         if (post.caption) {
@@ -1220,41 +1218,22 @@ async function sendInstagramPost(chatId, username, postOrShortcode) {
                 : post.caption;
             caption += `${truncated}\n\n`;
         }
-        caption += `🔗 [View on Instagram](${post.permalink})`;
+        caption += `🔗 Post URL: ${permalink}`;
 
-        if (isLegacy) {
-            await bot.sendPhoto(chatId, post.imagePath, {
+        const photoToSend = post.imagePath || post.thumbnail;
+
+        if (photoToSend) {
+            await bot.sendPhoto(chatId, photoToSend, {
                 caption: caption,
                 parse_mode: 'Markdown',
             });
         } else {
-            const mediaUrls = post.mediaUrls || [];
-            if (mediaUrls.length > 1) {
-                // Send multiple images as a media group
-                const mediaGroup = mediaUrls.map((url, i) => {
-                    const mediaItem = { type: 'photo', media: url };
-                    if (i === 0) {
-                        mediaItem.caption = caption;
-                        mediaItem.parse_mode = 'Markdown';
-                    }
-                    return mediaItem;
-                });
-                await bot.sendMediaGroup(chatId, mediaGroup);
-            } else if (mediaUrls.length === 1) {
-                // Send single image
-                await bot.sendPhoto(chatId, mediaUrls[0], {
-                    caption: caption,
-                    parse_mode: 'Markdown',
-                });
-            } else {
-                // Fallback text format
-                await bot.sendMessage(chatId, caption, {
-                    parse_mode: 'Markdown',
-                });
-            }
+            await bot.sendMessage(chatId, caption, {
+                parse_mode: 'Markdown',
+            });
         }
     } finally {
-        if (isLegacy && post && post.tmpDir) {
+        if (isDownloaded && post && post.tmpDir) {
             cleanupTmpDir(post.tmpDir);
         }
     }
