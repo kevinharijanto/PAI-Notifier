@@ -601,7 +601,7 @@ Instagram is checked daily at 8 AM.`;
         const statusMsg = await bot.sendMessage(chatId, `🔍 Verifying @${username}...`);
 
         try {
-            const posts = await fetchShortcodes(username);
+            const posts = await fetchPosts(username);
 
             if (posts.length === 0) {
                 bot.editMessageText(`❌ No posts found for @${username}. Make sure the profile is public.`, {
@@ -630,7 +630,7 @@ Instagram is checked daily at 8 AM.`;
             // Send the latest post immediately
             try {
                 const latestPost = posts[0];
-                await sendInstagramPost(chatId, username, latestPost.shortcode);
+                await sendInstagramPost(chatId, username, latestPost);
             } catch (postError) {
                 console.error('[Instagram] Error sending first post:', postError.message);
                 bot.sendMessage(chatId, '⚠️ Watchlist added but could not fetch the latest post. Will try again on next daily check.');
