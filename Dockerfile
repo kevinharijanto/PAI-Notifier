@@ -1,9 +1,14 @@
 # Dockerfile for PAI Notifier
 FROM node:20-alpine
 
-# Install Python and instaloader for Instagram monitoring
-RUN apk add --no-cache python3 py3-pip && \
-    pip3 install --break-system-packages instaloader
+# Install Chromium and necessary dependencies for Puppeteer
+RUN apk add --no-cache \
+      chromium \
+      nss \
+      freetype \
+      harfbuzz \
+      ca-certificates \
+      ttf-freefont
 
 # Create app directory
 WORKDIR /app
