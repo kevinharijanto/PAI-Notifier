@@ -1209,7 +1209,7 @@ async function sendInstagramPost(chatId, username, postOrShortcode) {
         const permalink = post.permalink || `https://www.instagram.com/p/${post.shortcode}/`;
         
         // Build caption (Telegram has 1024 char limit for media captions)
-        let caption = `📸 *@${username}*\n\n`;
+        let caption = `📸 [*@${username}*](https://www.instagram.com/${username})\n\n`;
         if (post.caption) {
             // Truncate caption if too long (reserve space for header + link)
             const maxCaptionLen = 900;
@@ -1222,7 +1222,18 @@ async function sendInstagramPost(chatId, username, postOrShortcode) {
 
         const photoToSend = post.imagePath || post.thumbnail;
 
-        if (photoToSend) {
+        if (post.mediaUrls && post.mediaUrls.length > 1) {
+            // Instagram Carousel - Send as a Telegram Media Group
+            const mediaGroup = post.mediaUrls.map((imgUrl, idx) => {
+                const item = { type: 'photo', media: imgUrl };
+                if (idx === 0) {
+                    item.caption = caption;
+                    item.parse_mode = 'Markdown';
+                }
+                return item;
+            });
+            await bot.sendMediaGroup(chatId, mediaGroup);
+        } else if (photoToSend) {
             await bot.sendPhoto(chatId, photoToSend, {
                 caption: caption,
                 parse_mode: 'Markdown',

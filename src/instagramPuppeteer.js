@@ -132,11 +132,16 @@ async function fetchPosts(username) {
                 const edges = data?.data?.user?.edge_owner_to_timeline_media?.edges || [];
                 return edges.map(e => {
                     const node = e.node;
+                    let mediaUrls = [node.display_url];
+                    if (node.edge_sidecar_to_children && node.edge_sidecar_to_children.edges) {
+                        mediaUrls = node.edge_sidecar_to_children.edges.map(child => child.node.display_url);
+                    }
                     return {
                         shortcode: node.shortcode,
                         id: node.id,
                         timestamp: node.taken_at_timestamp,
                         thumbnail: node.display_url,
+                        mediaUrls: mediaUrls,
                         caption: node.edge_media_to_caption?.edges?.[0]?.node?.text || ''
                     };
                 });
