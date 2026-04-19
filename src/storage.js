@@ -8,6 +8,7 @@ const ACCESS_REQUESTS_FILE = path.join(DATA_DIR, 'access_requests.json');
 const USER_PREFS_FILE = path.join(DATA_DIR, 'user_preferences.json');
 const EXAM_RESULTS_FILE = path.join(DATA_DIR, 'exam_results.json');
 const INSTAGRAM_SEEN_FILE = path.join(DATA_DIR, 'instagram_seen.json');
+const INSTAGRAM_STATE_FILE = path.join(DATA_DIR, 'instagram_state.json');
 
 /**
  * Ensures the data directory exists
@@ -507,6 +508,70 @@ function getAllWatchedAccounts() {
     }));
 }
 
+/**
+ * Loads Instagram account state from storage
+ * @returns {Object} Object mapping username to persisted state
+ */
+function loadInstagramState() {
+    ensureDataDir();
+
+    if (!fs.existsSync(INSTAGRAM_STATE_FILE)) {
+        return {};
+    }
+
+    try {
+        const data = fs.readFileSync(INSTAGRAM_STATE_FILE, 'utf8');
+        return JSON.parse(data) || {};
+    } catch (error) {
+        console.error('Error loading Instagram state:', error.message);
+        return {};
+    }
+}
+
+/**
+ * Saves Instagram account state to storage
+ * @param {Object} state - Object mapping username to persisted state
+ */
+function saveInstagramState(state) {
+    ensureDataDir();
+
+    try {
+        fs.writeFileSync(INSTAGRAM_STATE_FILE, JSON.stringify(state, null, 2));
+    } catch (error) {
+        console.error('Error saving Instagram state:', error.message);
+    }
+}
+
+/**
+ * Gets persisted Instagram state for an account
+ * @param {string} username - Instagram username
+ * @returns {Object|null} Persisted state or null
+ */
+function getInstagramState(username) {
+    const allState = loadInstagramState();
+    return allState[username] || null;
+}
+
+/**
+ * Updates persisted Instagram state for an account
+ * @param {string} username - Instagram username
+ * @param {Object} nextState - Partial state to merge
+ * @returns {Object} Updated state
+ */
+function updateInstagramState(username, nextState) {
+    const allState = loadInstagramState();
+    const currentState = allState[username] || {};
+    const updatedState = {
+        ...currentState,
+        ...nextState,
+    };
+
+    allState[username] = updatedState;
+    saveInstagramState(allState);
+
+    return updatedState;
+}
+
 module.exports = {
     loadSeenArticles,
     saveSeenArticles,
@@ -544,4 +609,6 @@ module.exports = {
     addWatchedAccount,
     removeWatchedAccount,
     getAllWatchedAccounts,
+    getInstagramState,
+    updateInstagramState,
 };

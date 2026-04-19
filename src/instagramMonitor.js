@@ -1,5 +1,5 @@
 const axios = require('axios');
-const { execSync } = require('child_process');
+const { execSync, spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -9,11 +9,13 @@ const IG_APP_ID = '936619743392459';
 const COOKIE_CACHE_FILE = path.join(__dirname, '../data/instagram_cookies.json');
 const COOKIE_CACHE_DURATION = 2 * 60 * 60 * 1000; // 2 hours
 const MIN_REQUEST_INTERVAL = 60 * 1000; // 1 minute between requests
+const INSTAGRAM_FETCH_MODE = (process.env.INSTAGRAM_FETCH_MODE || 'auto').toLowerCase();
 
 // Cookie cache state
 let cachedCookies = null;
 let cookieExpiry = null;
 let lastRequestTime = 0;
+let instaloaderAvailable = null;
 
 /**
  * Gets cookies with caching support
@@ -69,6 +71,19 @@ async function getCookies() {
     }
 
     return freshCookies;
+}
+
+function clearCookieCache() {
+    cachedCookies = null;
+    cookieExpiry = null;
+
+    try {
+        if (fs.existsSync(COOKIE_CACHE_FILE)) {
+            fs.unlinkSync(COOKIE_CACHE_FILE);
+        }
+    } catch (error) {
+        console.warn('[Instagram] Failed to clear cookie cache:', error.message);
+    }
 }
 
 /**
@@ -164,6 +179,145 @@ function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function isValidInstagramUsername(username) {
+    return typeof username === 'string' && /^[a-z0-9._]{1,30}$/i.test(username);
+}
+
+function shouldFallbackToInstaloader(error) {
+    const message = String(error?.message || '');
+    return /429|HTTP \d+|Instagram API returned HTTP|ECONNRESET|ETIMEDOUT|timeout|socket hang up/i.test(message);
+}
+
+function isInstaloaderAvailable() {
+    if (instaloaderAvailable !== null) {
+        return instaloaderAvailable;
+    }
+
+    try {
+        const result = spawnSync('instaloader', ['--version'], {
+            timeout: 10000,
+            stdio: 'ignore',
+        });
+        instaloaderAvailable = result.status === 0;
+    } catch (error) {
+        instaloaderAvailable = false;
+    }
+
+    return instaloaderAvailable;
+}
+
+function walkJsonFiles(dirPath) {
+    const jsonFiles = [];
+
+    for (const entry of fs.readdirSync(dirPath, { withFileTypes: true })) {
+        const fullPath = path.join(dirPath, entry.name);
+        if (entry.isDirectory()) {
+            jsonFiles.push(...walkJsonFiles(fullPath));
+        } else if (entry.isFile() && entry.name.endsWith('.json')) {
+            jsonFiles.push(fullPath);
+        }
+    }
+
+    return jsonFiles;
+}
+
+function getTimestampFromMetadata(metadata) {
+    if (typeof metadata?.taken_at_timestamp === 'number') {
+        return metadata.taken_at_timestamp;
+    }
+
+    if (typeof metadata?.node?.taken_at_timestamp === 'number') {
+        return metadata.node.taken_at_timestamp;
+    }
+
+    if (metadata?.date_utc) {
+        const parsed = Date.parse(metadata.date_utc);
+        if (!Number.isNaN(parsed)) {
+            return Math.floor(parsed / 1000);
+        }
+    }
+
+    return Math.floor(Date.now() / 1000);
+}
+
+function extractPostFromMetadata(metadata) {
+    const candidate = metadata?.node || metadata;
+    const shortcode = candidate?.shortcode;
+
+    if (!shortcode) {
+        return null;
+    }
+
+    return {
+        shortcode,
+        id: String(candidate.mediaid || candidate.id || shortcode),
+        timestamp: getTimestampFromMetadata(metadata),
+    };
+}
+
+async function fetchShortcodesWithInstaloader(username) {
+    if (!isValidInstagramUsername(username)) {
+        throw new Error(`Invalid Instagram username: ${username}`);
+    }
+
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ig-profile-'));
+
+    try {
+        console.log(`[Instagram] Fetching posts for @${username} via instaloader...`);
+
+        const args = [
+            username,
+            `--dirname-pattern=${tmpDir}`,
+            '--filename-pattern={shortcode}',
+            '--no-pictures',
+            '--no-videos',
+            '--no-video-thumbnails',
+            '--no-profile-pic',
+            '--no-captions',
+            '--no-compress-json',
+            '--fast-update',
+            '--count=12',
+        ];
+
+        const result = spawnSync('instaloader', args, {
+            encoding: 'utf8',
+            timeout: 120000,
+        });
+
+        if (result.status !== 0) {
+            const stderr = (result.stderr || '').trim();
+            throw new Error(stderr || `instaloader exited with code ${result.status}`);
+        }
+
+        const posts = walkJsonFiles(tmpDir)
+            .map(filePath => {
+                try {
+                    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+                } catch (error) {
+                    return null;
+                }
+            })
+            .map(extractPostFromMetadata)
+            .filter(Boolean)
+            .sort((a, b) => b.timestamp - a.timestamp);
+
+        const uniquePosts = [];
+        const seenShortcodes = new Set();
+
+        for (const post of posts) {
+            if (!seenShortcodes.has(post.shortcode)) {
+                seenShortcodes.add(post.shortcode);
+                uniquePosts.push(post);
+            }
+        }
+
+        console.log(`[Instagram] @${username} has ${uniquePosts.length} posts fetched via instaloader`);
+        return uniquePosts;
+    } finally {
+        cleanupTmpDir(tmpDir);
+    }
+}
+
 /**
  * Fetches recent post shortcodes from a public Instagram profile
  * Includes retry logic with exponential backoff for rate limiting (429)
@@ -171,8 +325,12 @@ function sleep(ms) {
  * @param {number} maxRetries - Maximum number of retries (default: 5)
  * @returns {Promise<Array<{shortcode: string, id: string, timestamp: number}>>}
  */
-async function fetchShortcodes(username, maxRetries = 5) {
+async function fetchShortcodesFromWeb(username, maxRetries = 5) {
     const retryDelays = [30000, 60000, 120000, 300000, 600000]; // 30s, 1m, 2m, 5m, 10m
+
+    if (!isValidInstagramUsername(username)) {
+        throw new Error(`Invalid Instagram username: ${username}`);
+    }
 
     // Enforce minimum interval between requests to avoid rate limiting
     const timeSinceLastRequest = Date.now() - lastRequestTime;
@@ -222,6 +380,7 @@ async function fetchShortcodes(username, maxRetries = 5) {
             lastRequestTime = Date.now();
 
             if (resp.status === 429) {
+                clearCookieCache();
                 if (attempt < maxRetries) {
                     const delay = retryDelays[attempt] || 300000;
                     console.warn(`[Instagram] Rate limited (429). Retrying in ${delay / 1000}s...`);
@@ -232,6 +391,9 @@ async function fetchShortcodes(username, maxRetries = 5) {
             }
 
             if (resp.status !== 200) {
+                if (resp.status === 401 || resp.status === 403) {
+                    clearCookieCache();
+                }
                 console.error(`[Instagram] HTTP ${resp.status} for @${username}`);
                 throw new Error(`Instagram API returned HTTP ${resp.status}`);
             }
@@ -261,6 +423,27 @@ async function fetchShortcodes(username, maxRetries = 5) {
                 throw error;
             }
         }
+    }
+}
+
+async function fetchShortcodes(username, maxRetries = 5) {
+    if (INSTAGRAM_FETCH_MODE === 'instaloader') {
+        if (!isInstaloaderAvailable()) {
+            throw new Error('INSTAGRAM_FETCH_MODE=instaloader but instaloader is not installed');
+        }
+        return fetchShortcodesWithInstaloader(username);
+    }
+
+    try {
+        return await fetchShortcodesFromWeb(username, maxRetries);
+    } catch (error) {
+        if (INSTAGRAM_FETCH_MODE === 'web' || !shouldFallbackToInstaloader(error) || !isInstaloaderAvailable()) {
+            throw error;
+        }
+
+        console.warn(`[Instagram] Web fetch failed for @${username}: ${error.message}`);
+        console.warn('[Instagram] Falling back to instaloader...');
+        return fetchShortcodesWithInstaloader(username);
     }
 }
 

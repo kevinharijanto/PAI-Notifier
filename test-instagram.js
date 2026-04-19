@@ -48,13 +48,13 @@ async function testFetchShortcodes(username) {
     console.log('\n' + '='.repeat(60));
     console.log(`TEST 2: Fetch Shortcodes for @${username}`);
     console.log('='.repeat(60));
-    
+
     try {
         console.log(`Fetching posts for @${username}...`);
         const posts = await fetchShortcodes(username, 0); // 0 retries for testing
-        
+
         console.log(`\n✅ Successfully fetched ${posts.length} post(s)!`);
-        
+
         if (posts.length > 0) {
             console.log('\nLatest posts:');
             posts.slice(0, 5).forEach((post, index) => {
@@ -64,12 +64,12 @@ async function testFetchShortcodes(username) {
                 console.log(`   Posted: ${date}`);
                 console.log(`   URL: https://www.instagram.com/p/${post.shortcode}/`);
             });
-            
+
             if (posts.length > 5) {
                 console.log(`\n... and ${posts.length - 5} more posts`);
             }
         }
-        
+
         return posts;
     } catch (error) {
         console.error('\n❌ Failed to fetch shortcodes:', error.message);
@@ -84,15 +84,15 @@ async function testFetchWithRetries(username) {
     console.log('\n' + '='.repeat(60));
     console.log(`TEST 3: Fetch Shortcodes with Retries for @${username}`);
     console.log('='.repeat(60));
-    
+
     try {
         console.log(`Fetching posts for @${username} with retry logic...`);
         console.log('This will test the full retry mechanism with exponential backoff.\n');
-        
+
         const posts = await fetchShortcodes(username, 3); // 3 retries
-        
+
         console.log(`\n✅ Successfully fetched ${posts.length} post(s) after retries!`);
-        
+
         if (posts.length > 0) {
             console.log('\nLatest posts:');
             posts.slice(0, 3).forEach((post, index) => {
@@ -102,7 +102,7 @@ async function testFetchWithRetries(username) {
                 console.log(`   URL: https://www.instagram.com/p/${post.shortcode}/`);
             });
         }
-        
+
         return posts;
     } catch (error) {
         console.error('\n❌ Failed to fetch shortcodes even with retries:', error.message);
@@ -166,27 +166,27 @@ async function runTests() {
     console.log('='.repeat(60));
     console.log('This script will test the Instagram monitoring functionality');
     console.log('to diagnose rate limiting issues.\n');
-    
+
     const username = 'aktuarisindonesia';
-    
+
     // Run tests
     const cookies = await testCookieRefresh();
-    
+
     if (cookies) {
         // Test 2: Single attempt
         await testFetchShortcodes(username);
-        
+
         // Test 3: With retries
         await testFetchWithRetries(username);
-        
+
         // Test 4: Multiple requests
         console.log('\n⚠️  Note: Test 4 will make multiple requests to Instagram.');
         console.log('This may trigger rate limiting. Continue? (Ctrl+C to cancel)');
         await new Promise(resolve => setTimeout(resolve, 3000));
-        
+
         await testMultipleRequests(username, 3);
     }
-    
+
     // Final summary
     console.log('\n' + '='.repeat(60));
     console.log('TEST SUITE COMPLETE');

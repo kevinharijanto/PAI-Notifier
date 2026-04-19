@@ -13,14 +13,55 @@ const {
     getAllUsersWithReminders,
     getUserPreference,
     setUserPreference,
+    getAllWatchedAccounts,
     getSeenPostsForUser,
     markPostsAsSeen,
+    getInstagramState,
+    updateInstagramState,
 } = require('./storage');
 
 // Track last check time per user for interval-based scheduling
 const userLastCheck = new Map();
 // Track last known registration status to detect changes
 let lastRegistrationOpen = false;
+const INSTAGRAM_STARTUP_COOLDOWN_MINUTES = Number.parseInt(process.env.INSTAGRAM_STARTUP_COOLDOWN_MINUTES || '1200', 10);
+const INSTAGRAM_STARTUP_COOLDOWN_MS = (
+    Number.isFinite(INSTAGRAM_STARTUP_COOLDOWN_MINUTES) && INSTAGRAM_STARTUP_COOLDOWN_MINUTES > 0
+        ? INSTAGRAM_STARTUP_COOLDOWN_MINUTES
+        : 1200
+) * 60 * 1000;
+
+function formatElapsed(ms) {
+    const minutes = Math.max(1, Math.round(ms / 60000));
+
+    if (minutes < 60) {
+        return `${minutes}m`;
+    }
+
+    const hours = Math.floor(minutes / 60);
+    const remainingMinutes = minutes % 60;
+    return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
+}
+
+function getInstagramStartupSkipReason(username, seenPosts) {
+    if (seenPosts.size === 0) {
+        return null;
+    }
+
+    const state = getInstagramState(username);
+    const lastSuccessAt = state?.lastSuccessAt ? Date.parse(state.lastSuccessAt) : Number.NaN;
+
+    if (!Number.isFinite(lastSuccessAt)) {
+        return null;
+    }
+
+    const elapsed = Date.now() - lastSuccessAt;
+    if (elapsed < 0 || elapsed >= INSTAGRAM_STARTUP_COOLDOWN_MS) {
+        return null;
+    }
+
+    return `last successful check was ${formatElapsed(elapsed)} ago`;
+}
 
 /**
  * Main check function - scrapes website and notifies if new articles found
@@ -159,7 +200,7 @@ async function runPerUserChecks() {
  * Notifies all users who have reminders enabled
  * @param {boolean} isFirstRun - If true, send latest post; otherwise notify only for new posts
  */
-async function checkInstagramUpdates(isFirstRun = false) {
+async function legacyCheckInstagramUpdates(isFirstRun = false) {
     const username = 'aktuarisindonesia';
 
     console.log(`[${new Date().toISOString()}] Checking Instagram @${username}...`);
@@ -260,6 +301,115 @@ async function checkInstagramUpdates(isFirstRun = false) {
 }
 
 /**
+ * Checks watched Instagram accounts for new posts.
+ * This replaces the legacy hardcoded-account flow without forcing a risky full-file rewrite.
+ * @param {boolean} isFirstRun - If true, send latest post; otherwise notify only for new posts
+ */
+async function runInstagramNotifierChecks(isFirstRun = false) {
+    const bot = getBot();
+    if (!bot) return;
+
+    const watchedAccounts = getAllWatchedAccounts();
+    const adminId = process.env.ADMIN_CHAT_ID;
+
+    if (watchedAccounts.length === 0) {
+        console.log(`[${new Date().toISOString()}] No watched Instagram accounts configured.`);
+        return;
+    }
+
+    for (const { username, watchers } of watchedAccounts) {
+        const recipients = new Set(watchers.map(userId => String(userId)));
+        if (adminId) recipients.add(String(adminId));
+
+        if (recipients.size === 0) {
+            continue;
+        }
+
+        const seenPosts = getSeenPostsForUser(username);
+        if (isFirstRun) {
+            const skipReason = getInstagramStartupSkipReason(username, seenPosts);
+            if (skipReason) {
+                console.log(`[${new Date().toISOString()}] Skipping startup Instagram check for @${username}: ${skipReason}.`);
+                continue;
+            }
+        }
+
+        console.log(`[${new Date().toISOString()}] Checking Instagram @${username} for ${recipients.size} recipient(s)...`);
+        updateInstagramState(username, {
+            lastAttemptAt: new Date().toISOString(),
+        });
+
+        try {
+            const posts = await fetchShortcodes(username);
+
+            if (posts.length === 0) {
+                console.log(`[${new Date().toISOString()}] No posts found for @${username}`);
+                updateInstagramState(username, {
+                    lastSuccessAt: new Date().toISOString(),
+                    lastError: null,
+                    lastPostCount: 0,
+                });
+                continue;
+            }
+
+            if (isFirstRun && seenPosts.size === 0) {
+                console.log(`[${new Date().toISOString()}] First run for @${username} - sending latest post`);
+                const latestPost = posts[0];
+
+                for (const userId of recipients) {
+                    try {
+                        await sendInstagramPost(userId, username, latestPost.shortcode);
+                    } catch (e) {
+                        console.error(`[Instagram] Failed to send @${username} to ${userId}:`, e.message);
+                    }
+                }
+
+                markPostsAsSeen(username, posts.map(p => p.shortcode));
+            } else {
+                const newPosts = posts.filter(p => !seenPosts.has(p.shortcode));
+
+                if (newPosts.length === 0) {
+                    console.log(`[${new Date().toISOString()}] No new posts from @${username}`);
+                } else {
+                    console.log(`[${new Date().toISOString()}] Found ${newPosts.length} new post(s) from @${username}!`);
+
+                    for (const post of newPosts) {
+                        for (const userId of recipients) {
+                            try {
+                                await sendInstagramPost(userId, username, post.shortcode);
+                            } catch (e) {
+                                console.error(`[Instagram] Failed to send post ${post.shortcode} from @${username} to ${userId}:`, e.message);
+                            }
+                        }
+                    }
+
+                    markPostsAsSeen(username, newPosts.map(p => p.shortcode));
+                }
+            }
+
+            updateInstagramState(username, {
+                lastSuccessAt: new Date().toISOString(),
+                lastError: null,
+                lastPostCount: posts.length,
+            });
+        } catch (error) {
+            console.error(`[${new Date().toISOString()}] Error checking @${username}:`, error.message);
+            updateInstagramState(username, {
+                lastError: error.message,
+            });
+
+            for (const userId of recipients) {
+                try {
+                    await bot.sendMessage(userId, `⚠️ Error checking @${username}: ${error.message}`);
+                } catch (e) {
+                    // ignore
+                }
+            }
+        }
+    }
+}
+
+/**
  * Test mode - runs scraper once and shows results without sending notifications
  */
 async function runTestMode() {
@@ -326,20 +476,19 @@ async function main() {
     console.log('\n📡 Running initial check...');
     await checkForUpdates(true);
 
-    // Run initial Instagram check
+    // Run initial Instagram check when watched accounts exist and the last success is stale
     console.log('\n📸 Running initial Instagram check...');
-    await checkInstagramUpdates(true);
+    await runInstagramNotifierChecks(true);
 
     // Schedule per-user checks every minute (the function checks individual intervals)
     cron.schedule('* * * * *', async () => {
         await runPerUserChecks();
     });
 
-    // Schedule Instagram checks daily at 8 AM GMT+7 (Asia/Jakarta)
-    // 8 AM GMT+7 = 1 AM UTC
-    cron.schedule('0 1 * * *', async () => {
+    // Schedule Instagram checks daily at 8 AM Asia/Jakarta
+    cron.schedule('0 8 * * *', async () => {
         console.log(`\n[${new Date().toISOString()}] Running daily Instagram check (8 AM GMT+7)...`);
-        await checkInstagramUpdates(false);
+        await runInstagramNotifierChecks(false);
     }, {
         timezone: 'Asia/Jakarta'
     });
